@@ -1,0 +1,4 @@
+nicegui
+pyyaml
+python-dotenv
+requests

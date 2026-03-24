@@ -1,1 +1,81 @@
-# mvp_inspector
+# TL IDE
+
+Плагинируемая IDE для team lead-задач: GitLab, GitHub, Jira и любые кастомные инструменты через единый веб-интерфейс.
+
+## Требования
+
+- Python 3.10+
+- pip
+
+## Установка
+
+```bash
+# 1. Клонировать репозиторий
+git clone <repo-url>
+cd mvp_inspector
+
+# 2. Создать виртуальное окружение
+python -m venv .venv
+source .venv/bin/activate      # Linux / macOS
+.venv\Scripts\activate         # Windows
+
+# 3. Установить зависимости
+pip install -r requirements.txt
+
+# 4. Настроить окружение
+cp .env.example .env           # если есть .env.example
+# или отредактировать .env вручную — добавить токены для GitLab, GitHub, Jira и т.д.
+
+# 5. Настроить конфиг (URL сервисов и прочее)
+# Отредактировать config.yaml
+```
+
+## Запуск
+
+```bash
+python main.py
+```
+
+Приложение откроется в браузере по адресу **http://localhost:8080**
+
+## Создание нового плагина
+
+```bash
+python create_plugin.py <название> [категория]
+
+# Примеры:
+python create_plugin.py pr_checker code_review
+python create_plugin.py deploy_status devops
+```
+
+Создаётся файл `plugins/<категория>/<название>/plugin.py`.
+Открой его и реализуй метод `run(inputs) -> str`.
+
+Добавить конфиг плагина: секция `plugins.<название>` в `config.yaml`.
+Добавить секреты: переменные в `.env`.
+
+## Структура проекта
+
+```
+mvp_inspector/
+├── main.py               # точка входа
+├── create_plugin.py      # генератор плагинов
+├── config.yaml           # конфиг (URL, настройки)
+├── .env                  # секреты (токены) — не коммитить
+├── requirements.txt
+└── plugins/
+    ├── base_plugin.py    # базовый класс плагина
+    └── <категория>/
+        └── <плагин>/
+            └── plugin.py
+```
+
+## Типы полей формы
+
+| Тип | Описание |
+|---|---|
+| `string` | Однострочный ввод |
+| `textarea` | Многострочный ввод (код, промпты) |
+| `int` | Числовой ввод |
+| `bool` | Чекбокс |
+| `select_or_input` | Выпадающий список + ручной ввод |

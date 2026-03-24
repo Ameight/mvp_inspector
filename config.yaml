@@ -1,0 +1,26 @@
+app:
+  title: TL IDE
+
+plugins:
+
+  # --- General ---
+  ip_checker:
+    api_url: https://api.ipify.org
+
+  # --- GitLab ---
+  # Токен: GITLAB_TOKEN в .env
+  gitlab:
+    url: https://gitlab.example.com
+    default_project: ""          # например: my-group/my-repo
+
+  # --- GitHub ---
+  # Токен: GITHUB_TOKEN в .env
+  github:
+    default_repo: ""             # например: org/repo
+
+  # --- Jira ---
+  # Токен: JIRA_TOKEN в .env
+  # Email: JIRA_EMAIL в .env
+  jira:
+    url: https://yourcompany.atlassian.net
+    default_project: ""          # например: MYPROJECT
