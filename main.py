@@ -1,5 +1,6 @@
 from nicegui import ui
 import importlib.util
+import os
 import yaml
 import inspect
 import subprocess
@@ -46,7 +47,27 @@ for p in loaded_plugins:
 
 NEW_PLUGIN_SENTINEL = "__new_plugin__"
 MARKETPLACE_SENTINEL = "__marketplace__"
+SETTINGS_SENTINEL = "__settings__"
 REGISTRY_URL = "https://raw.githubusercontent.com/Ameight/tl-ide-plugins/master/registry.json"
+
+
+def save_env_vars(updates: dict) -> None:
+    """Записывает переменные в .env и сразу применяет в os.environ."""
+    env_path = Path(".env")
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    key_to_idx = {
+        line.split("=", 1)[0].strip(): i
+        for i, line in enumerate(lines)
+        if "=" in line and not line.startswith("#")
+    }
+    for key, value in updates.items():
+        os.environ[key] = value
+        if key in key_to_idx:
+            lines[key_to_idx[key]] = f"{key}={value}"
+        else:
+            lines.append(f"{key}={value}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
 
 # === Состояние
 state: dict = {"plugin": loaded_plugins[0] if loaded_plugins else None}
@@ -222,11 +243,128 @@ def plugin_panel():
         ui.timer(0.05, load_registry, once=True)
         return
 
+    if p is SETTINGS_SENTINEL:
+        ui.label("Настройки").classes("text-2xl font-bold mb-1")
+        ui.label("Переменные окружения и конфигурация плагинов.").classes("text-gray-400 text-sm mb-6")
+
+        plugins_with_env = [pl for pl in loaded_plugins if pl.get_required_env()]
+        if plugins_with_env:
+            ui.label("Переменные окружения").classes("text-lg font-semibold mb-3")
+            for pl in plugins_with_env:
+                req = pl.get_required_env()
+                missing = [k for k in req if not os.getenv(k)]
+                with ui.card().classes("w-full mb-3"):
+                    with ui.row().classes("items-center justify-between w-full"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.icon("check_circle" if not missing else "warning",
+                                    color="green" if not missing else "orange")
+                            ui.label(pl.get_display_name()).classes("font-semibold")
+                            ui.badge(pl.get_category(), color="blue").props("outline")
+                        def _open_plugin_env_dialog(plugin=pl, plugin_req=req):
+                            field_inputs: dict = {}
+                            with ui.dialog() as dlg, ui.card().classes("min-w-96"):
+                                ui.label("Переменные окружения").classes("text-xl font-bold mb-1")
+                                ui.label(plugin.get_display_name()).classes("text-gray-400 text-sm mb-4")
+                                for var_name, meta in plugin_req.items():
+                                    is_secret = meta.get("secret", True)
+                                    field_inputs[var_name] = ui.input(
+                                        label=f"{meta.get('label', var_name)}  ({var_name})",
+                                        value=os.getenv(var_name, ""),
+                                        password=is_secret,
+                                        password_toggle_button=is_secret,
+                                    ).classes("w-full")
+                                    if meta.get("description"):
+                                        ui.label(meta["description"]).classes("text-gray-500 text-xs -mt-2 mb-2")
+                                with ui.row().classes("gap-2 mt-4 justify-end w-full"):
+                                    ui.button("Отмена", on_click=dlg.close).props("flat")
+                                    def _save(d=dlg, fi=field_inputs):
+                                        upd = {k: v.value for k, v in fi.items() if v.value}
+                                        if upd:
+                                            save_env_vars(upd)
+                                            ui.notify(f"Сохранено: {len(upd)} переменных", type="positive")
+                                        d.close()
+                                        plugin_panel.refresh()
+                                    ui.button("Сохранить", on_click=_save).props("unelevated color=primary")
+                            dlg.open()
+                        ui.button("Изменить", on_click=_open_plugin_env_dialog).props("flat dense")
+                    with ui.column().classes("w-full mt-2 gap-1"):
+                        for var_name, meta in req.items():
+                            val = os.getenv(var_name)
+                            with ui.row().classes("items-center gap-2"):
+                                ui.icon("circle", color="green" if val else "red").classes("text-xs")
+                                ui.label(var_name).classes("font-mono text-sm")
+                                ui.label(meta.get("label", "")).classes("text-gray-400 text-sm")
+                                if val:
+                                    ui.label("настроено").classes("text-green-500 text-xs ml-auto")
+                                else:
+                                    ui.label("не задано").classes("text-red-400 text-xs ml-auto")
+        else:
+            ui.label("Ни один загруженный плагин не требует env-переменных.").classes("text-gray-500 text-sm mb-4")
+
+        ui.separator().classes("my-4")
+        ui.label("config.yaml").classes("text-lg font-semibold mb-2")
+        yaml_content = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
+        config_area = ui.textarea(value=yaml_content).classes("w-full font-mono text-sm").props("rows=20 outlined")
+
+        def save_config():
+            try:
+                yaml.safe_load(config_area.value)  # validate
+                CONFIG_PATH.write_text(config_area.value, encoding="utf-8")
+                ui.notify("config.yaml сохранён. Перезапусти приложение для применения.", type="positive", timeout=5000)
+            except yaml.YAMLError as e:
+                ui.notify(f"Ошибка YAML: {e}", type="negative", timeout=8000)
+
+        ui.button("Сохранить config.yaml", on_click=save_config).props("unelevated color=primary").classes("mt-2")
+        return
+
     p: PluginInterface
     ui.label(p.get_display_name()).classes("text-2xl font-bold mb-1")
     desc = p.get_description()
     if desc:
         ui.label(desc).classes("text-gray-400 text-sm mb-4")
+
+    # Env vars check
+    required_env = p.get_required_env()
+    if required_env:
+        missing_env = [k for k in required_env if not os.getenv(k)]
+
+        def open_env_dialog(plugin=p, req=required_env):
+            field_inputs: dict = {}
+            with ui.dialog() as dlg, ui.card().classes("min-w-96"):
+                ui.label("Переменные окружения").classes("text-xl font-bold mb-1")
+                ui.label(plugin.get_display_name()).classes("text-gray-400 text-sm mb-4")
+                for var_name, meta in req.items():
+                    is_secret = meta.get("secret", True)
+                    field_inputs[var_name] = ui.input(
+                        label=f"{meta.get('label', var_name)}  ({var_name})",
+                        value=os.getenv(var_name, ""),
+                        password=is_secret,
+                        password_toggle_button=is_secret,
+                    ).classes("w-full")
+                    if meta.get("description"):
+                        ui.label(meta["description"]).classes("text-gray-500 text-xs -mt-2 mb-2")
+                with ui.row().classes("gap-2 mt-4 justify-end w-full"):
+                    ui.button("Отмена", on_click=dlg.close).props("flat")
+                    def do_save(d=dlg, fi=field_inputs):
+                        upd = {k: v.value for k, v in fi.items() if v.value}
+                        if upd:
+                            save_env_vars(upd)
+                            ui.notify(f"Сохранено: {len(upd)} переменных", type="positive")
+                        d.close()
+                        plugin_panel.refresh()
+                    ui.button("Сохранить", on_click=do_save).props("unelevated color=primary")
+            dlg.open()
+
+        bg = "background: #2d1b00;" if missing_env else "background: #0d2b0d;"
+        with ui.row().classes("items-center gap-2 mb-4 px-3 py-2 rounded w-full").style(bg):
+            if missing_env:
+                ui.icon("warning", color="orange")
+                ui.label(f"Не настроено: {', '.join(missing_env)}").classes("text-orange-300 text-sm flex-1")
+            else:
+                ui.icon("check_circle", color="green")
+                ui.label("Все переменные окружения настроены").classes("text-green-400 text-sm flex-1")
+            lbl = "Настроить" if missing_env else "Изменить"
+            ui.button(lbl, on_click=open_env_dialog).props("flat dense size=sm")
 
     schema = p.get_config_schema()
     inputs: dict = {}
@@ -310,6 +448,10 @@ with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
                     state["plugin"] = NEW_PLUGIN_SENTINEL
                     plugin_panel.refresh()
                 ui.button("+", on_click=open_new_plugin).props("flat round dense").classes("text-gray-400").tooltip("Добавить плагин")
+                def open_settings():
+                    state["plugin"] = SETTINGS_SENTINEL
+                    plugin_panel.refresh()
+                ui.button("⚙", on_click=open_settings).props("flat round dense").classes("text-gray-400").tooltip("Настройки")
 
         if not loaded_plugins:
             ui.label("Нет плагинов").classes("text-red-400 text-sm px-4")

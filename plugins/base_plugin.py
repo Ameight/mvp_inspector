@@ -90,3 +90,24 @@ class PluginInterface(ABC):
     def is_enabled(self) -> bool:
         """False — плагин не загружается."""
         return True
+
+    def get_required_env(self) -> dict:
+        """
+        Объявляет env-переменные, необходимые плагину.
+        При открытии плагина UI проверит их наличие и предложит настроить.
+
+        Пример:
+            return {
+                "JIRA_TOKEN": {
+                    "label": "Jira API Token",
+                    "description": "Токен из Jira → Profile → Security → API tokens",
+                    "secret": True,
+                },
+                "JIRA_EMAIL": {
+                    "label": "Jira Email",
+                    "description": "Почта аккаунта Jira",
+                    "secret": False,
+                },
+            }
+        """
+        return {}

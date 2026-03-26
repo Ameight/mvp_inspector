@@ -15,6 +15,20 @@ class JiraIssueInfoPlugin(PluginInterface):
     def get_category(self) -> str:
         return "Jira"
 
+    def get_required_env(self) -> dict:
+        return {
+            "JIRA_EMAIL": {
+                "label": "Jira Email",
+                "description": "Почта аккаунта Jira",
+                "secret": False,
+            },
+            "JIRA_TOKEN": {
+                "label": "Jira API Token",
+                "description": "Jira → Profile → Security → API tokens",
+                "secret": True,
+            },
+        }
+
     def get_config_schema(self) -> dict:
         return {
             "issue_key": {
