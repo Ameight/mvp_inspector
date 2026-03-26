@@ -2,6 +2,9 @@ from nicegui import ui
 import importlib.util
 import yaml
 import inspect
+import subprocess
+import sys
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
 from plugins.base_plugin import PluginInterface
@@ -42,6 +45,8 @@ for p in loaded_plugins:
     plugins_by_category[p.get_category()].append(p)
 
 NEW_PLUGIN_SENTINEL = "__new_plugin__"
+MARKETPLACE_SENTINEL = "__marketplace__"
+REGISTRY_URL = "https://raw.githubusercontent.com/Ameight/tl-ide-plugins/master/registry.json"
 
 # === Состояние
 state: dict = {"plugin": loaded_plugins[0] if loaded_plugins else None}
@@ -135,6 +140,88 @@ def plugin_panel():
         ).classes("w-full")
         return
 
+    if p is MARKETPLACE_SENTINEL:
+        ui.label("Marketplace").classes("text-2xl font-bold mb-1")
+        ui.label("Плагины из официального реестра. После установки перезапусти приложение.").classes("text-gray-400 text-sm mb-4")
+
+        search_input = ui.input(placeholder="Поиск по названию или категории...").classes("w-full mb-4")
+        status_label = ui.label("Загрузка...").classes("text-gray-400 text-sm")
+        cards_column = ui.column().classes("w-full gap-3")
+
+        def is_installed(plugin_id: str) -> bool:
+            return (PLUGINS_DIR / plugin_id / "plugin.py").exists()
+
+        def render_cards(registry: list, search: str = ""):
+            cards_column.clear()
+            search = search.lower()
+            filtered = [
+                e for e in registry
+                if not search
+                or search in e.get("name", "").lower()
+                or search in e.get("category", "").lower()
+                or search in e.get("description", "").lower()
+            ]
+            status_label.set_text(f"{len(filtered)} плагинов" if filtered else "Ничего не найдено")
+            with cards_column:
+                for entry in filtered:
+                    plugin_id = entry.get("id", "")
+                    installed = is_installed(plugin_id)
+                    with ui.card().classes("w-full"):
+                        with ui.row().classes("items-start justify-between w-full"):
+                            with ui.column().classes("gap-0"):
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.label(entry.get("name", "?")).classes("font-semibold")
+                                    ui.badge(entry.get("category", ""), color="blue").props("outline")
+                                ui.label(entry.get("description", "")).classes("text-gray-400 text-sm")
+                                requires = entry.get("requires", [])
+                                if requires:
+                                    ui.label("requires: " + ", ".join(requires)).classes("text-gray-600 text-xs mt-1")
+                            with ui.column().classes("items-end gap-1 shrink-0"):
+                                if installed:
+                                    ui.label("✓ Установлен").classes("text-green-500 text-sm")
+                                else:
+                                    async def install(e=entry):
+                                        await do_install(e)
+                                    ui.button("Установить", on_click=install).props("dense unelevated").classes("text-sm")
+                                ui.label(f"v{entry.get('version', '?')}  ·  {entry.get('author', '?')}").classes("text-gray-600 text-xs")
+
+        async def do_install(entry: dict):
+            plugin_id = entry.get("id", "")
+            raw_url = entry.get("raw_url", "")
+            requires = entry.get("requires", [])
+            dest = PLUGINS_DIR / plugin_id / "plugin.py"
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                code = await asyncio.to_thread(lambda: requests.get(raw_url, timeout=10).text)
+                dest.write_text(code, encoding="utf-8")
+                if requires:
+                    await asyncio.to_thread(
+                        lambda: subprocess.run(
+                            [sys.executable, "-m", "pip", "install", *requires],
+                            check=True, capture_output=True,
+                        )
+                    )
+                ui.notify(f"✅ {entry.get('name')} установлен. Перезапусти приложение.", type="positive", timeout=6000)
+                plugin_panel.refresh()
+            except Exception as e:
+                ui.notify(f"❌ Ошибка установки: {e}", type="negative", timeout=8000)
+
+        async def load_registry():
+            try:
+                resp = await asyncio.to_thread(lambda: requests.get(REGISTRY_URL, timeout=10))
+                if resp.status_code == 404:
+                    status_label.set_text("❌ registry.json не найден. Запусти publish.py в репо tl-ide-plugins.")
+                    return
+                resp.raise_for_status()
+                data = resp.json()
+                render_cards(data)
+                search_input.on("update:model-value", lambda e: render_cards(data, e.args))
+            except Exception as e:
+                status_label.set_text(f"❌ Не удалось загрузить реестр: {e}")
+
+        ui.timer(0.05, load_registry, once=True)
+        return
+
     p: PluginInterface
     ui.label(p.get_display_name()).classes("text-2xl font-bold mb-1")
     desc = p.get_description()
@@ -214,10 +301,15 @@ with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
     ):
         with ui.row().classes("items-center justify-between px-4 py-4"):
             ui.label("TL IDE").classes("text-lg font-bold")
-            def open_new_plugin():
-                state["plugin"] = NEW_PLUGIN_SENTINEL
-                plugin_panel.refresh()
-            ui.button("+", on_click=open_new_plugin).props("flat round dense").classes("text-gray-400")
+            with ui.row().classes("gap-1"):
+                def open_marketplace():
+                    state["plugin"] = MARKETPLACE_SENTINEL
+                    plugin_panel.refresh()
+                ui.button("🛒", on_click=open_marketplace).props("flat round dense").tooltip("Marketplace")
+                def open_new_plugin():
+                    state["plugin"] = NEW_PLUGIN_SENTINEL
+                    plugin_panel.refresh()
+                ui.button("+", on_click=open_new_plugin).props("flat round dense").classes("text-gray-400").tooltip("Добавить плагин")
 
         if not loaded_plugins:
             ui.label("Нет плагинов").classes("text-red-400 text-sm px-4")
