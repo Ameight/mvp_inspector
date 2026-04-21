@@ -92,7 +92,9 @@ def parse_version(v: str) -> tuple[int, ...]:
 def get_dirty_tracked_files() -> list[str]:
     try:
         r = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
-        return [line[3:].strip() for line in r.stdout.splitlines() if line.strip()]
+        # Пропускаем неотслеживаемые файлы (??) — они не мешают checkout
+        return [line[3:].strip() for line in r.stdout.splitlines()
+                if line.strip() and not line.startswith("??")]
     except Exception:
         return []
 
@@ -122,8 +124,13 @@ async def do_update(tag: str) -> None:
         app_log(msg, level="warning", source="updater")
         ui.notify(msg, type="warning", timeout=8000)
         return
-    # Сохраняем конфиг до git checkout — он может перезаписать config.yaml
+    # Сохраняем и удаляем config.yaml до checkout:
+    # - backup нужен чтобы не потерять настройки
+    # - удаление нужно чтобы git не падал с "untracked file would be overwritten"
+    #   (актуально при откате на тег, где config.yaml ещё был отслежен)
     config_backup = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else None
+    if CONFIG_PATH.exists():
+        CONFIG_PATH.unlink()
     spinner = ui.notification("Обновление...", spinner=True, timeout=None)
     try:
         app_log(f"Начинаем обновление до {tag}", source="updater")
