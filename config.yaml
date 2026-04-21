@@ -1,6 +1,12 @@
 app:
   title: TL IDE
 
+marketplaces:
+  - name: Official
+    url: https://raw.githubusercontent.com/Ameight/tl-ide-plugins/master/registry.json
+  # - name: MyTeam
+  #   url: https://raw.githubusercontent.com/yourorg/plugins/master/registry.json
+
 plugins:
 
   # --- General ---

@@ -1,6 +1,9 @@
 from nicegui import ui
 import importlib.util
+import hashlib
+import json
 import os
+import shutil
 import yaml
 import inspect
 import subprocess
@@ -14,6 +17,10 @@ from collections import defaultdict
 
 PLUGINS_DIR = Path("plugins")
 CONFIG_PATH = Path("config.yaml")
+MANIFEST_PATH = PLUGINS_DIR / "manifest.json"
+VERSION_PATH = Path("VERSION")
+GITHUB_REPO = "Ameight/mvp_inspector"
+update_state: dict = {"latest_release": None, "checked": False, "error": None}
 
 # === Конфигурация
 load_dotenv()
@@ -23,10 +30,112 @@ if CONFIG_PATH.exists():
 else:
     config = {}
 
+
+# === Manifest — источник и целостность плагинов
+def load_manifest() -> dict:
+    if MANIFEST_PATH.exists():
+        try:
+            return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_manifest(manifest: dict) -> None:
+    MANIFEST_PATH.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
+def compute_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def get_local_version() -> str:
+    return VERSION_PATH.read_text(encoding="utf-8").strip() if VERSION_PATH.exists() else "0.0.0"
+
+
+def parse_version(v: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in v.lstrip("v").split("."))
+    except Exception:
+        return (0, 0, 0)
+
+
+def get_dirty_tracked_files() -> list[str]:
+    try:
+        r = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+        return [line[3:].strip() for line in r.stdout.splitlines() if line.strip()]
+    except Exception:
+        return []
+
+
+async def fetch_latest_release() -> dict | None:
+    try:
+        resp = await asyncio.to_thread(
+            lambda: requests.get(
+                f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                timeout=8,
+                headers={"Accept": "application/vnd.github+json"},
+            )
+        )
+        return resp.json() if resp.status_code == 200 else None
+    except Exception:
+        return None
+
+
+async def do_update(tag: str) -> None:
+    dirty = get_dirty_tracked_files()
+    if dirty:
+        ui.notify(
+            f"Незафиксированные изменения: {', '.join(dirty[:3])}{'...' if len(dirty) > 3 else ''}. "
+            "Сделай git stash или commit перед обновлением.",
+            type="warning", timeout=8000,
+        )
+        return
+    spinner = ui.notification("Обновление...", spinner=True, timeout=None)
+    try:
+        await asyncio.to_thread(lambda: subprocess.run(
+            ["git", "fetch", "--tags"], check=True, capture_output=True
+        ))
+        await asyncio.to_thread(lambda: subprocess.run(
+            ["git", "checkout", tag], check=True, capture_output=True
+        ))
+        await asyncio.to_thread(lambda: subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+            check=True, capture_output=True,
+        ))
+        spinner.dismiss()
+        ui.notify(f"✅ Обновлено до {tag}. Перезапусти приложение.", type="positive", timeout=0)
+    except subprocess.CalledProcessError as e:
+        spinner.dismiss()
+        err = (e.stderr or b"").decode(errors="replace")
+        ui.notify(f"❌ Ошибка обновления: {err[:200] or str(e)}", type="negative", timeout=10000)
+
+
+def check_integrity(plugin_id: str, manifest: dict) -> bool:
+    """SHA256 проверка для marketplace-плагинов. Custom всегда OK."""
+    entry = manifest.get(plugin_id, {})
+    if entry.get("source") != "marketplace":
+        return True
+    stored = entry.get("sha256")
+    if not stored:
+        return True
+    plugin_file = PLUGINS_DIR / plugin_id / "plugin.py"
+    if not plugin_file.exists():
+        return False
+    return compute_sha256(plugin_file) == stored
+
+
 # === Загрузка плагинов
+manifest = load_manifest()
 loaded_plugins: list[PluginInterface] = []
+# id(instance) -> {plugin_id, source, integrity_ok, plugin_file}
+plugin_meta: dict[int, dict] = {}
+
 for plugin_file in sorted(PLUGINS_DIR.rglob("plugin.py")):
     try:
+        plugin_id = "/".join(plugin_file.parts[1:-1])
         module_name = f"plugin_{'_'.join(plugin_file.parts[1:-1])}"
         spec = importlib.util.spec_from_file_location(module_name, plugin_file)
         mod = importlib.util.module_from_spec(spec)
@@ -38,6 +147,16 @@ for plugin_file in sorted(PLUGINS_DIR.rglob("plugin.py")):
                 instance.configure(plugin_config)
                 if instance.is_enabled():
                     loaded_plugins.append(instance)
+                    m_entry = manifest.get(plugin_id, {})
+                    p_source = m_entry.get("source", "custom")
+                    p_label = m_entry.get("marketplace", "local") if p_source == "marketplace" else "local"
+                    plugin_meta[id(instance)] = {
+                        "plugin_id": plugin_id,
+                        "source": p_source,
+                        "label": p_label,
+                        "integrity_ok": check_integrity(plugin_id, manifest),
+                        "plugin_file": plugin_file,
+                    }
     except Exception as e:
         print(f"⚠️ Ошибка загрузки {plugin_file}: {e}")
 
@@ -48,7 +167,21 @@ for p in loaded_plugins:
 NEW_PLUGIN_SENTINEL = "__new_plugin__"
 MARKETPLACE_SENTINEL = "__marketplace__"
 SETTINGS_SENTINEL = "__settings__"
-REGISTRY_URL = "https://raw.githubusercontent.com/Ameight/tl-ide-plugins/master/registry.json"
+MARKETPLACES: list[dict] = config.get("marketplaces", [
+    {"name": "Official", "url": "https://raw.githubusercontent.com/Ameight/tl-ide-plugins/master/registry.json"}
+])
+
+
+def save_marketplaces(new_list: list) -> None:
+    """Обновляет MARKETPLACES в памяти и сохраняет в config.yaml."""
+    MARKETPLACES.clear()
+    MARKETPLACES.extend(new_list)
+    cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+    cfg["marketplaces"] = new_list
+    CONFIG_PATH.write_text(
+        yaml.dump(cfg, allow_unicode=True, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 def save_env_vars(updates: dict) -> None:
@@ -67,6 +200,39 @@ def save_env_vars(updates: dict) -> None:
         else:
             lines.append(f"{key}={value}")
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def delete_plugin(plugin: PluginInterface) -> None:
+    meta = plugin_meta.get(id(plugin), {})
+    plugin_id = meta.get("plugin_id", "")
+    pfile: Path | None = meta.get("plugin_file")
+
+    if pfile and pfile.exists():
+        pfile.unlink()
+        parent = pfile.parent
+        # Удаляем папку плагина если пустая (кроме __pycache__)
+        leftover = [f for f in parent.iterdir() if f.name != "__pycache__"]
+        if not leftover:
+            shutil.rmtree(parent, ignore_errors=True)
+
+    # Обновляем manifest
+    if plugin_id:
+        m = load_manifest()
+        m.pop(plugin_id, None)
+        save_manifest(m)
+
+    # Убираем из памяти
+    if plugin in loaded_plugins:
+        loaded_plugins.remove(plugin)
+    category = plugin.get_category()
+    if category in plugins_by_category and plugin in plugins_by_category[category]:
+        plugins_by_category[category].remove(plugin)
+        if not plugins_by_category[category]:
+            del plugins_by_category[category]
+
+    state["plugin"] = loaded_plugins[0] if loaded_plugins else None
+    sidebar_panel.refresh()
+    plugin_panel.refresh()
 
 
 # === Состояние
@@ -107,6 +273,73 @@ class MyPlugin(PluginInterface):
 '''
 
 
+def _env_dialog(plugin: PluginInterface, req: dict) -> None:
+    """Открывает модальное окно для настройки env-переменных плагина."""
+    field_inputs: dict = {}
+    with ui.dialog() as dlg, ui.card().classes("min-w-96"):
+        ui.label("Переменные окружения").classes("text-xl font-bold mb-1")
+        ui.label(plugin.get_display_name()).classes("text-gray-400 text-sm mb-4")
+        for var_name, meta in req.items():
+            is_secret = meta.get("secret", True)
+            field_inputs[var_name] = ui.input(
+                label=f"{meta.get('label', var_name)}  ({var_name})",
+                value=os.getenv(var_name, ""),
+                password=is_secret,
+                password_toggle_button=is_secret,
+            ).classes("w-full")
+            if meta.get("description"):
+                ui.label(meta["description"]).classes("text-gray-500 text-xs -mt-2 mb-2")
+        with ui.row().classes("gap-2 mt-4 justify-end w-full"):
+            ui.button("Отмена", on_click=dlg.close).props("flat")
+            def do_save(d=dlg, fi=field_inputs):
+                upd = {k: v.value for k, v in fi.items() if v.value}
+                if upd:
+                    save_env_vars(upd)
+                    ui.notify(f"Сохранено: {len(upd)} переменных", type="positive")
+                d.close()
+                plugin_panel.refresh()
+            ui.button("Сохранить", on_click=do_save).props("unelevated color=primary")
+    dlg.open()
+
+
+@ui.refreshable
+def sidebar_panel():
+    if not loaded_plugins:
+        ui.label("Нет плагинов").classes("text-red-400 text-sm px-4")
+        return
+    for category in sorted(plugins_by_category):
+        with ui.expansion(category, value=True).classes("w-full").style(
+            "border-radius: 0;"
+        ).props("dense expand-icon-class='text-gray-500'"):
+            for p in plugins_by_category[category]:
+                def make_handler(plugin=p):
+                    def handler():
+                        state["plugin"] = plugin
+                        plugin_panel.refresh()
+                    return handler
+
+                is_active = state["plugin"] is p
+                pmeta = plugin_meta.get(id(p), {})
+                plabel = pmeta.get("label", "local")
+                pintact = pmeta.get("integrity_ok", True)
+
+                btn = ui.button(on_click=make_handler()).classes(
+                    "w-full text-sm" + (" bg-blue-900" if is_active else "")
+                ).props("flat align=left").style("border-radius: 0; padding: 6px 16px;")
+                with btn:
+                    with ui.row().classes("items-center gap-2 w-full no-wrap"):
+                        if not pintact:
+                            ui.icon("warning", size="xs", color="red")
+                        elif plabel != "local":
+                            ui.icon("storefront", size="xs").classes("text-blue-400").tooltip(plabel)
+                        else:
+                            ui.icon("code", size="xs").classes("text-gray-600")
+                        with ui.column().classes("gap-0 flex-1 min-w-0"):
+                            ui.label(p.get_display_name()).classes("text-sm leading-tight")
+                            lc = "text-blue-400" if plabel != "local" else "text-gray-500"
+                            ui.label(plabel).classes(f"text-xs {lc}")
+
+
 # === Панель плагина (перерисовывается при смене)
 @ui.refreshable
 def plugin_panel():
@@ -136,7 +369,7 @@ def plugin_panel():
         ).classes("text-gray-400 text-sm")
 
         with ui.row().classes("w-full gap-2 mt-1"):
-            code_area = ui.textarea(value=PLUGIN_TEMPLATE).classes("flex-1 font-mono text-sm").props("rows=30 outlined readonly")
+            ui.textarea(value=PLUGIN_TEMPLATE).classes("flex-1 font-mono text-sm").props("rows=30 outlined readonly")
             async def copy_template():
                 await ui.run_javascript(f"navigator.clipboard.writeText({repr(PLUGIN_TEMPLATE)})")
                 ui.notify("Скопировано!", type="positive")
@@ -163,43 +396,55 @@ def plugin_panel():
 
     if p is MARKETPLACE_SENTINEL:
         ui.label("Marketplace").classes("text-2xl font-bold mb-1")
-        ui.label("Плагины из официального реестра. После установки перезапусти приложение.").classes("text-gray-400 text-sm mb-4")
+        ui.label("Плагины из подключённых реестров. После установки перезапусти приложение.").classes("text-gray-400 text-sm mb-4")
 
-        search_input = ui.input(placeholder="Поиск по названию или категории...").classes("w-full mb-4")
+        with ui.row().classes("w-full gap-3 mb-4"):
+            search_input = ui.input(placeholder="Поиск по названию или категории...").classes("flex-1")
+            mp_options = ["Все"] + [m["name"] for m in MARKETPLACES]
+            mp_select = ui.select(mp_options, value="Все", label="Маркетплейс").classes("w-48")
         status_label = ui.label("Загрузка...").classes("text-gray-400 text-sm")
         cards_column = ui.column().classes("w-full gap-3")
 
         def is_installed(plugin_id: str) -> bool:
             return (PLUGINS_DIR / plugin_id / "plugin.py").exists()
 
-        def render_cards(registry: list, search: str = ""):
+        def render_cards(registry: list, search: str = "", mp_filter: str = "Все"):
             cards_column.clear()
             search = search.lower()
             filtered = [
                 e for e in registry
-                if not search
-                or search in e.get("name", "").lower()
-                or search in e.get("category", "").lower()
-                or search in e.get("description", "").lower()
+                if (not search
+                    or search in e.get("name", "").lower()
+                    or search in e.get("category", "").lower()
+                    or search in e.get("description", "").lower())
+                and (mp_filter == "Все" or e.get("_marketplace") == mp_filter)
             ]
             status_label.set_text(f"{len(filtered)} плагинов" if filtered else "Ничего не найдено")
+            current_manifest = load_manifest()
             with cards_column:
                 for entry in filtered:
                     plugin_id = entry.get("id", "")
                     installed = is_installed(plugin_id)
+                    integrity_ok = check_integrity(plugin_id, current_manifest) if installed else True
+                    mp_name = entry.get("_marketplace", "")
                     with ui.card().classes("w-full"):
                         with ui.row().classes("items-start justify-between w-full"):
                             with ui.column().classes("gap-0"):
                                 with ui.row().classes("items-center gap-2"):
                                     ui.label(entry.get("name", "?")).classes("font-semibold")
                                     ui.badge(entry.get("category", ""), color="blue").props("outline")
+                                    if len(MARKETPLACES) > 1:
+                                        ui.badge(mp_name, color="teal").props("outline")
                                 ui.label(entry.get("description", "")).classes("text-gray-400 text-sm")
                                 requires = entry.get("requires", [])
                                 if requires:
                                     ui.label("requires: " + ", ".join(requires)).classes("text-gray-600 text-xs mt-1")
                             with ui.column().classes("items-end gap-1 shrink-0"):
                                 if installed:
-                                    ui.label("✓ Установлен").classes("text-green-500 text-sm")
+                                    if not integrity_ok:
+                                        ui.label("⚠ Изменён").classes("text-orange-400 text-sm")
+                                    else:
+                                        ui.label("✓ Установлен").classes("text-green-500 text-sm")
                                 else:
                                     async def install(e=entry):
                                         await do_install(e)
@@ -210,11 +455,22 @@ def plugin_panel():
             plugin_id = entry.get("id", "")
             raw_url = entry.get("raw_url", "")
             requires = entry.get("requires", [])
+            mp_name = entry.get("_marketplace", MARKETPLACES[0]["name"] if MARKETPLACES else "")
             dest = PLUGINS_DIR / plugin_id / "plugin.py"
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 code = await asyncio.to_thread(lambda: requests.get(raw_url, timeout=10).text)
                 dest.write_text(code, encoding="utf-8")
+                m = load_manifest()
+                m[plugin_id] = {
+                    "source": "marketplace",
+                    "marketplace": mp_name,
+                    "sha256": compute_sha256(dest),
+                    "name": entry.get("name", ""),
+                    "version": entry.get("version", ""),
+                    "author": entry.get("author", ""),
+                }
+                save_manifest(m)
                 if requires:
                     await asyncio.to_thread(
                         lambda: subprocess.run(
@@ -227,18 +483,44 @@ def plugin_panel():
             except Exception as e:
                 ui.notify(f"❌ Ошибка установки: {e}", type="negative", timeout=8000)
 
+        all_entries: list = []
+
         async def load_registry():
-            try:
-                resp = await asyncio.to_thread(lambda: requests.get(REGISTRY_URL, timeout=10))
-                if resp.status_code == 404:
-                    status_label.set_text("❌ registry.json не найден. Запусти publish.py в репо tl-ide-plugins.")
-                    return
-                resp.raise_for_status()
-                data = resp.json()
-                render_cards(data)
-                search_input.on("update:model-value", lambda e: render_cards(data, e.args))
-            except Exception as e:
-                status_label.set_text(f"❌ Не удалось загрузить реестр: {e}")
+            nonlocal all_entries
+            results = await asyncio.gather(
+                *[
+                    asyncio.to_thread(lambda url=m["url"], name=m["name"]: (name, requests.get(url, timeout=10)))
+                    for m in MARKETPLACES
+                ],
+                return_exceptions=True,
+            )
+            all_entries = []
+            errors = []
+            for item in results:
+                if isinstance(item, Exception):
+                    errors.append(str(item))
+                    continue
+                mp_name, resp = item
+                try:
+                    if resp.status_code == 404:
+                        errors.append(f"{mp_name}: registry.json не найден")
+                        continue
+                    resp.raise_for_status()
+                    for entry in resp.json():
+                        entry["_marketplace"] = mp_name
+                        all_entries.append(entry)
+                except Exception as e:
+                    errors.append(f"{mp_name}: {e}")
+
+            if errors and not all_entries:
+                status_label.set_text("❌ " + "; ".join(errors))
+                return
+            render_cards(all_entries)
+            if errors:
+                ui.notify("Не удалось загрузить: " + "; ".join(errors), type="warning")
+
+            search_input.on("update:model-value", lambda e: render_cards(all_entries, e.args, mp_select.value))
+            mp_select.on("update:model-value", lambda _: render_cards(all_entries, search_input.value, mp_select.value))
 
         ui.timer(0.05, load_registry, once=True)
         return
@@ -260,33 +542,7 @@ def plugin_panel():
                                     color="green" if not missing else "orange")
                             ui.label(pl.get_display_name()).classes("font-semibold")
                             ui.badge(pl.get_category(), color="blue").props("outline")
-                        def _open_plugin_env_dialog(plugin=pl, plugin_req=req):
-                            field_inputs: dict = {}
-                            with ui.dialog() as dlg, ui.card().classes("min-w-96"):
-                                ui.label("Переменные окружения").classes("text-xl font-bold mb-1")
-                                ui.label(plugin.get_display_name()).classes("text-gray-400 text-sm mb-4")
-                                for var_name, meta in plugin_req.items():
-                                    is_secret = meta.get("secret", True)
-                                    field_inputs[var_name] = ui.input(
-                                        label=f"{meta.get('label', var_name)}  ({var_name})",
-                                        value=os.getenv(var_name, ""),
-                                        password=is_secret,
-                                        password_toggle_button=is_secret,
-                                    ).classes("w-full")
-                                    if meta.get("description"):
-                                        ui.label(meta["description"]).classes("text-gray-500 text-xs -mt-2 mb-2")
-                                with ui.row().classes("gap-2 mt-4 justify-end w-full"):
-                                    ui.button("Отмена", on_click=dlg.close).props("flat")
-                                    def _save(d=dlg, fi=field_inputs):
-                                        upd = {k: v.value for k, v in fi.items() if v.value}
-                                        if upd:
-                                            save_env_vars(upd)
-                                            ui.notify(f"Сохранено: {len(upd)} переменных", type="positive")
-                                        d.close()
-                                        plugin_panel.refresh()
-                                    ui.button("Сохранить", on_click=_save).props("unelevated color=primary")
-                            dlg.open()
-                        ui.button("Изменить", on_click=_open_plugin_env_dialog).props("flat dense")
+                        ui.button("Изменить", on_click=lambda plugin=pl, r=req: _env_dialog(plugin, r)).props("flat dense")
                     with ui.column().classes("w-full mt-2 gap-1"):
                         for var_name, meta in req.items():
                             val = os.getenv(var_name)
@@ -302,59 +558,156 @@ def plugin_panel():
             ui.label("Ни один загруженный плагин не требует env-переменных.").classes("text-gray-500 text-sm mb-4")
 
         ui.separator().classes("my-4")
+        ui.label("Маркетплейсы").classes("text-lg font-semibold mb-3")
+        ui.label("Изменения применяются сразу и сохраняются в config.yaml.").classes("text-gray-400 text-sm mb-3")
+
+        mp_rows: list[dict] = []
+        mp_list_col = ui.column().classes("w-full gap-2 mb-3")
+
+        def render_mp_rows():
+            mp_list_col.clear()
+            mp_rows.clear()
+            with mp_list_col:
+                for idx, mp in enumerate(list(MARKETPLACES)):
+                    row_inputs: dict = {}
+                    with ui.card().classes("w-full"):
+                        with ui.row().classes("items-center gap-2 w-full"):
+                            row_inputs["name"] = ui.input(value=mp["name"], label="Название").classes("w-36")
+                            row_inputs["url"] = ui.input(value=mp["url"], label="URL registry.json").classes("flex-1")
+                            def do_save_row(i=idx, ri=row_inputs):
+                                updated = list(MARKETPLACES)
+                                updated[i] = {"name": ri["name"].value.strip(), "url": ri["url"].value.strip()}
+                                if updated[i]["name"] and updated[i]["url"]:
+                                    save_marketplaces(updated)
+                                    ui.notify("Сохранено", type="positive")
+                            def do_delete_row(i=idx):
+                                save_marketplaces([m for j, m in enumerate(MARKETPLACES) if j != i])
+                                render_mp_rows()
+                            ui.button(icon="save", on_click=do_save_row).props("flat round dense color=primary").tooltip("Сохранить")
+                            ui.button(icon="delete", on_click=do_delete_row).props("flat round dense color=red-4").tooltip("Удалить")
+                    mp_rows.append(row_inputs)
+
+        render_mp_rows()
+
+        with ui.card().classes("w-full"):
+            with ui.row().classes("items-center gap-2 w-full"):
+                new_name = ui.input(label="Название").classes("w-36")
+                new_url = ui.input(label="URL registry.json").classes("flex-1")
+                def do_add_mp():
+                    name_val = new_name.value.strip()
+                    url_val = new_url.value.strip()
+                    if not name_val or not url_val:
+                        ui.notify("Заполни название и URL", type="warning")
+                        return
+                    save_marketplaces(list(MARKETPLACES) + [{"name": name_val, "url": url_val}])
+                    new_name.set_value("")
+                    new_url.set_value("")
+                    render_mp_rows()
+                    ui.notify(f"Добавлен маркетплейс «{name_val}»", type="positive")
+                ui.button(icon="add", on_click=do_add_mp).props("flat round dense color=primary").tooltip("Добавить")
+
+        ui.separator().classes("my-4")
         ui.label("config.yaml").classes("text-lg font-semibold mb-2")
         yaml_content = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
         config_area = ui.textarea(value=yaml_content).classes("w-full font-mono text-sm").props("rows=20 outlined")
 
         def save_config():
             try:
-                yaml.safe_load(config_area.value)  # validate
+                yaml.safe_load(config_area.value)
                 CONFIG_PATH.write_text(config_area.value, encoding="utf-8")
                 ui.notify("config.yaml сохранён. Перезапусти приложение для применения.", type="positive", timeout=5000)
             except yaml.YAMLError as e:
                 ui.notify(f"Ошибка YAML: {e}", type="negative", timeout=8000)
 
         ui.button("Сохранить config.yaml", on_click=save_config).props("unelevated color=primary").classes("mt-2")
+
+        ui.separator().classes("my-4")
+        ui.label("Обновления").classes("text-lg font-semibold mb-2")
+        local_v = get_local_version()
+        ui.label(f"Текущая версия: {local_v}").classes("text-gray-400 text-sm mb-3")
+
+        upd_err = update_state.get("error")
+        if upd_err:
+            ui.label(f"Ошибка: {upd_err}").classes("text-red-400 text-sm mb-2")
+
+        upd_release = update_state.get("latest_release")
+        if update_state.get("checked") and upd_release:
+            upd_tag = upd_release.get("tag_name", "")
+            if parse_version(upd_tag) > parse_version(local_v):
+                with ui.card().classes("w-full mb-3").style("background: #0d2b0d; border: 1px solid #1a4a1a;"):
+                    with ui.row().classes("items-center gap-2 mb-2"):
+                        ui.icon("system_update_alt", color="green")
+                        ui.label(f"Доступна {upd_tag}").classes("text-green-400 font-semibold")
+                    upd_body = upd_release.get("body", "")
+                    if upd_body:
+                        ui.markdown(upd_body[:600]).classes("text-sm mb-3")
+                    async def _do_update_click(t=upd_tag):
+                        await do_update(t)
+                    ui.button(f"Обновить до {upd_tag}", on_click=_do_update_click).props("unelevated color=positive")
+            else:
+                with ui.row().classes("items-center gap-2 mb-3"):
+                    ui.icon("check_circle", color="green")
+                    ui.label(f"Установлена последняя версия ({upd_tag})").classes("text-green-500 text-sm")
+
+        async def _check_updates():
+            update_state["error"] = None
+            plugin_panel.refresh()
+            rel = await fetch_latest_release()
+            if rel is None:
+                update_state["error"] = "Не удалось получить данные с GitHub"
+            else:
+                update_state["latest_release"] = rel
+            update_state["checked"] = True
+            plugin_panel.refresh()
+
+        ui.button("Проверить обновления", on_click=_check_updates).props("outlined")
         return
 
+    # === Обычный плагин
     p: PluginInterface
-    ui.label(p.get_display_name()).classes("text-2xl font-bold mb-1")
+    meta = plugin_meta.get(id(p), {})
+    label = meta.get("label", "local")
+    integrity_ok = meta.get("integrity_ok", True)
+
+    # Заголовок + бейдж источника + кнопка удаления
+    with ui.row().classes("items-center justify-between w-full mb-1"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label(p.get_display_name()).classes("text-2xl font-bold")
+            if not integrity_ok:
+                ui.badge("⚠ изменён", color="red").props("outline")
+            elif label != "local":
+                ui.badge(label, color="blue").props("outline")
+            else:
+                ui.badge("local", color="grey").props("outline")
+
+        def confirm_delete(plugin=p):
+            with ui.dialog() as dlg, ui.card():
+                ui.label("Удалить плагин?").classes("text-lg font-bold mb-2")
+                ui.label(f"Файл плагина «{plugin.get_display_name()}» будет удалён безвозвратно.").classes("text-gray-400 text-sm mb-4")
+                with ui.row().classes("gap-2 justify-end w-full"):
+                    ui.button("Отмена", on_click=dlg.close).props("flat")
+                    def do_delete(d=dlg, pl=plugin):
+                        d.close()
+                        delete_plugin(pl)
+                    ui.button("Удалить", on_click=do_delete).props("unelevated color=negative")
+            dlg.open()
+
+        ui.button(icon="delete", on_click=confirm_delete).props("flat round dense color=red-4").tooltip("Удалить плагин")
+
     desc = p.get_description()
     if desc:
         ui.label(desc).classes("text-gray-400 text-sm mb-4")
+
+    # Предупреждение о нарушенной целостности
+    if not integrity_ok:
+        with ui.row().classes("items-center gap-2 mb-4 px-3 py-2 rounded w-full").style("background: #2d0a0a;"):
+            ui.icon("warning", color="red")
+            ui.label("Файл плагина был изменён после установки из marketplace.").classes("text-red-300 text-sm")
 
     # Env vars check
     required_env = p.get_required_env()
     if required_env:
         missing_env = [k for k in required_env if not os.getenv(k)]
-
-        def open_env_dialog(plugin=p, req=required_env):
-            field_inputs: dict = {}
-            with ui.dialog() as dlg, ui.card().classes("min-w-96"):
-                ui.label("Переменные окружения").classes("text-xl font-bold mb-1")
-                ui.label(plugin.get_display_name()).classes("text-gray-400 text-sm mb-4")
-                for var_name, meta in req.items():
-                    is_secret = meta.get("secret", True)
-                    field_inputs[var_name] = ui.input(
-                        label=f"{meta.get('label', var_name)}  ({var_name})",
-                        value=os.getenv(var_name, ""),
-                        password=is_secret,
-                        password_toggle_button=is_secret,
-                    ).classes("w-full")
-                    if meta.get("description"):
-                        ui.label(meta["description"]).classes("text-gray-500 text-xs -mt-2 mb-2")
-                with ui.row().classes("gap-2 mt-4 justify-end w-full"):
-                    ui.button("Отмена", on_click=dlg.close).props("flat")
-                    def do_save(d=dlg, fi=field_inputs):
-                        upd = {k: v.value for k, v in fi.items() if v.value}
-                        if upd:
-                            save_env_vars(upd)
-                            ui.notify(f"Сохранено: {len(upd)} переменных", type="positive")
-                        d.close()
-                        plugin_panel.refresh()
-                    ui.button("Сохранить", on_click=do_save).props("unelevated color=primary")
-            dlg.open()
-
         bg = "background: #2d1b00;" if missing_env else "background: #0d2b0d;"
         with ui.row().classes("items-center gap-2 mb-4 px-3 py-2 rounded w-full").style(bg):
             if missing_env:
@@ -364,7 +717,7 @@ def plugin_panel():
                 ui.icon("check_circle", color="green")
                 ui.label("Все переменные окружения настроены").classes("text-green-400 text-sm flex-1")
             lbl = "Настроить" if missing_env else "Изменить"
-            ui.button(lbl, on_click=open_env_dialog).props("flat dense size=sm")
+            ui.button(lbl, on_click=lambda plugin=p, req=required_env: _env_dialog(plugin, req)).props("flat dense size=sm")
 
     schema = p.get_config_schema()
     inputs: dict = {}
@@ -453,28 +806,25 @@ with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
                     plugin_panel.refresh()
                 ui.button("⚙", on_click=open_settings).props("flat round dense").classes("text-gray-400").tooltip("Настройки")
 
-        if not loaded_plugins:
-            ui.label("Нет плагинов").classes("text-red-400 text-sm px-4")
-        else:
-            for category in sorted(plugins_by_category):
-                with ui.expansion(category, value=True).classes("w-full").style(
-                    "border-radius: 0;"
-                ).props("dense expand-icon-class='text-gray-500'"):
-                    for p in plugins_by_category[category]:
-                        def make_handler(plugin=p):
-                            def handler():
-                                state["plugin"] = plugin
-                                plugin_panel.refresh()
-                            return handler
-
-                        is_active = state["plugin"] is p
-                        ui.button(p.get_display_name(), on_click=make_handler()).classes(
-                            "w-full text-sm"
-                            + (" bg-blue-900" if is_active else "")
-                        ).props("flat align=left").style("border-radius: 0; padding: 6px 16px;")
+        sidebar_panel()
 
     # Основная область
     with ui.column().classes("flex-1 p-8 overflow-auto"):
         plugin_panel()
+
+async def _startup_update_check():
+    rel = await fetch_latest_release()
+    if rel is None:
+        return
+    update_state["latest_release"] = rel
+    update_state["checked"] = True
+    tag = rel.get("tag_name", "")
+    if parse_version(tag) > parse_version(get_local_version()):
+        ui.notify(
+            f"Доступна новая версия {tag}. Перейди в Настройки → Обновления.",
+            type="info", timeout=8000,
+        )
+
+ui.timer(2.0, _startup_update_check, once=True)
 
 ui.run(title="TL IDE", favicon="🛠️")

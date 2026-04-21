@@ -3,4 +3,42 @@
 ---
 подсвечивание кастомного плагина и плагина из маркетплейса. Может можно будет проверять ещё целостность плагина ? Как это устроено в больших системах ?
 ---
-система обновления самой утилиты
+Давай подумаем над системой обновления самой утилиты
+
+ВАРИАНТЫ:
+
+A — Git pull (проще всего)
+  check:  git fetch → сравнить локальный SHA с remote HEAD
+  update: git pull origin master + pip install -r requirements.txt
+  + не нужны релизы, работает прямо сейчас
+  - нет версий, нет changelog, dirty tree → конфликт
+
+B — GitHub Releases (рекомендуется)
+  check:  api.github.com/repos/Ameight/mvp_inspector/releases/latest → tag vs local VERSION
+  update: git fetch --tags → git checkout v1.2.0 → pip install -r requirements.txt
+  + semver, changelog из release notes, можно откатиться
+  - нужно создавать релизы через GitHub
+
+C — Скачать zip (без git на машине)
+  check:  GitHub Releases API → zipball_url
+  update: скачать zip → распаковать → заменить файлы (кроме защищённых)
+  + работает без git
+  - сложнее, нужен аккуратный мерж пользовательских данных
+
+ЧТО ЗАЩИЩАТЬ ПРИ ОБНОВЛЕНИИ (никогда не трогать):
+  .env
+  config.yaml
+  plugins/manifest.json
+  plugins/*/*/plugin.py  (только custom-плагины)
+
+ПЛАН ДЛЯ ВАРИАНТА B:
+  1. Файл VERSION с текущей версией (1.0.0)
+  2. В Settings: текущая версия + кнопка "Проверить обновления"
+  3. Если есть новая — показать changelog и кнопку "Обновить"
+  4. Если dirty working tree — предупредить, не обновлять
+
+ВОПРОСЫ ДЛЯ РЕШЕНИЯ:
+  1. Релизы с тегами (v1.0.0) или просто сравнивать SHA коммитов?
+  2. Пользователи всегда клонируют через git или возможен zip-install?
+  3. Автопроверка при старте или только по кнопке?
+  4. Кнопка "Перезапустить" (os.execv) или вручную?
