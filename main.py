@@ -11,16 +11,14 @@ import sys
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
-from plugins.base_plugin import PluginInterface, app_log, _logs
+from sdk.base_plugin import PluginInterface, app_log, _logs
 import asyncio
 from collections import defaultdict
 
-PLUGINS_DIR = Path("plugins")
 CONFIG_PATH = Path("config.yaml")
-MANIFEST_PATH = PLUGINS_DIR / "manifest.json"
 VERSION_PATH = Path("VERSION")
 GITHUB_REPO = "Ameight/mvp_inspector"
-update_state: dict = {"latest_release": None, "checked": False, "error": None}
+update_state: dict = {"latest_release": None, "checked": False, "error": None, "update_done": None, "banner_dismissed": False}
 
 # === Конфигурация
 load_dotenv()
@@ -29,6 +27,13 @@ if CONFIG_PATH.exists():
         config = yaml.safe_load(f) or {}
 else:
     config = {}
+
+# Директория плагинов — читается из config.yaml: app.plugins_dir
+_plugins_dir_raw = (config.get("app") or {}).get("plugins_dir", "plugins")
+PLUGINS_DIR = Path(_plugins_dir_raw).expanduser()
+if not PLUGINS_DIR.is_absolute():
+    PLUGINS_DIR = Path(__file__).parent / PLUGINS_DIR
+MANIFEST_PATH = PLUGINS_DIR / "manifest.json"
 
 
 # === Manifest — источник и целостность плагинов
@@ -112,7 +117,8 @@ async def do_update(tag: str) -> None:
         ))
         app_log("pip install — OK", source="updater")
         spinner.dismiss()
-        ui.notify(f"✅ Обновлено до {tag}. Перезапусти приложение.", type="positive", timeout=0)
+        update_state["update_done"] = tag
+        plugin_panel.refresh()
     except subprocess.CalledProcessError as e:
         spinner.dismiss()
         err = (e.stderr or b"").decode(errors="replace")
@@ -249,7 +255,7 @@ state: dict = {"plugin": loaded_plugins[0] if loaded_plugins else None}
 
 
 PLUGIN_TEMPLATE = '''\
-from plugins.base_plugin import PluginInterface
+from sdk.base_plugin import PluginInterface
 
 
 class MyPlugin(PluginInterface):
@@ -454,6 +460,27 @@ def plugin_panel():
                                         ui.label("⚠ Изменён").classes("text-orange-400 text-sm")
                                     else:
                                         ui.label("✓ Установлен").classes("text-green-500 text-sm")
+                                    installed_v = current_manifest.get(plugin_id, {}).get("version", "")
+                                    registry_v = entry.get("version", "")
+                                    versions_list = entry.get("versions", [])
+                                    if versions_list:
+                                        v_options = [v["version"] for v in versions_list]
+                                        default_v = installed_v if installed_v in v_options else (v_options[-1] if v_options else installed_v)
+                                        with ui.row().classes("items-center gap-1 mt-1"):
+                                            ver_sel = ui.select(v_options, value=default_v).props("dense outlined").classes("text-xs").style("min-width:90px")
+                                            async def install_ver(e=entry, vs=ver_sel, vl=versions_list):
+                                                sel = vs.value
+                                                v_data = next((v for v in vl if v["version"] == sel), None)
+                                                if v_data:
+                                                    await do_install({**e, "version": sel, "raw_url": v_data.get("raw_url", e.get("raw_url", ""))})
+                                            ui.button("Установить", on_click=install_ver).props("dense unelevated").classes("text-xs")
+                                    elif installed_v and registry_v and parse_version(registry_v) > parse_version(installed_v):
+                                        ui.label(f"v{installed_v} → v{registry_v}").classes("text-orange-400 text-xs mt-1")
+                                        async def update_p(e=entry):
+                                            await do_install(e)
+                                        ui.button(f"Обновить до v{registry_v}", on_click=update_p).props("dense unelevated color=positive").classes("text-xs mt-1")
+                                    elif installed_v:
+                                        ui.label(f"v{installed_v}").classes("text-gray-500 text-xs mt-1")
                                 else:
                                     async def install(e=entry):
                                         await do_install(e)
@@ -641,6 +668,13 @@ def plugin_panel():
                 ui.button(icon="add", on_click=do_add_mp).props("flat round dense color=primary").tooltip("Добавить")
 
         ui.separator().classes("my-4")
+        ui.label("Плагины").classes("text-lg font-semibold mb-2")
+        with ui.row().classes("items-center gap-2 mb-1"):
+            ui.icon("folder", color="grey").classes("text-sm")
+            ui.label(str(PLUGINS_DIR)).classes("text-gray-400 text-sm font-mono")
+        ui.label("Путь задаётся в config.yaml → app.plugins_dir (абсолютный или относительный к main.py)").classes("text-gray-600 text-xs mb-1")
+
+        ui.separator().classes("my-4")
         ui.label("config.yaml").classes("text-lg font-semibold mb-2")
         yaml_content = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
         config_area = ui.textarea(value=yaml_content).classes("w-full font-mono text-sm").props("rows=20 outlined")
@@ -667,13 +701,29 @@ def plugin_panel():
         is_git_repo = Path(".git").exists()
 
         upd_release = update_state.get("latest_release")
-        if update_state.get("checked") and upd_release:
+
+        if update_state.get("update_done"):
+            done_tag = update_state["update_done"]
+            with ui.card().classes("w-full mb-3").style("background: #0d2b0d; border: 1px solid #1a4a1a;"):
+                with ui.row().classes("items-center gap-2 mb-3"):
+                    ui.icon("check_circle", color="green")
+                    ui.label(f"Обновлено до {done_tag}. Перезапусти для применения.").classes("text-green-400 font-semibold")
+                def _restart():
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                ui.button("Перезапустить", icon="restart_alt", on_click=_restart).props("unelevated color=positive")
+
+        elif update_state.get("checked") and upd_release:
             upd_tag = upd_release.get("tag_name", "")
-            if parse_version(upd_tag) > parse_version(local_v):
+            if parse_version(upd_tag) > parse_version(local_v) and not update_state.get("banner_dismissed"):
                 with ui.card().classes("w-full mb-3").style("background: #0d2b0d; border: 1px solid #1a4a1a;"):
-                    with ui.row().classes("items-center gap-2 mb-2"):
-                        ui.icon("system_update_alt", color="green")
-                        ui.label(f"Доступна {upd_tag}").classes("text-green-400 font-semibold")
+                    with ui.row().classes("items-center justify-between w-full mb-2"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.icon("system_update_alt", color="green")
+                            ui.label(f"Доступна {upd_tag}").classes("text-green-400 font-semibold")
+                        def _dismiss_banner():
+                            update_state["banner_dismissed"] = True
+                            plugin_panel.refresh()
+                        ui.button(icon="close", on_click=_dismiss_banner).props("flat round dense color=grey-5").tooltip("Скрыть")
                     upd_body = upd_release.get("body", "")
                     if upd_body:
                         ui.markdown(upd_body[:600]).classes("text-sm mb-3")
@@ -685,7 +735,7 @@ def plugin_panel():
                         download_url = upd_release.get("html_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
                         ui.label("Скачай новую версию:").classes("text-gray-400 text-sm mb-1")
                         ui.link(download_url, download_url, new_tab=True).classes("text-blue-400 text-sm break-all")
-            else:
+            elif parse_version(upd_tag) <= parse_version(local_v):
                 with ui.row().classes("items-center gap-2 mb-3"):
                     ui.icon("check_circle", color="green")
                     ui.label(f"Установлена последняя версия ({upd_tag})").classes("text-green-500 text-sm")
@@ -838,15 +888,15 @@ with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
                 def open_marketplace():
                     state["plugin"] = MARKETPLACE_SENTINEL
                     plugin_panel.refresh()
-                ui.button("🛒", on_click=open_marketplace).props("flat round dense").tooltip("Marketplace")
+                ui.button(icon="storefront", on_click=open_marketplace).props("flat round dense").tooltip("Marketplace")
                 def open_new_plugin():
                     state["plugin"] = NEW_PLUGIN_SENTINEL
                     plugin_panel.refresh()
-                ui.button("+", on_click=open_new_plugin).props("flat round dense").classes("text-gray-400").tooltip("Добавить плагин")
+                ui.button(icon="add", on_click=open_new_plugin).props("flat round dense").classes("text-gray-400").tooltip("Добавить плагин")
                 def open_settings():
                     state["plugin"] = SETTINGS_SENTINEL
                     plugin_panel.refresh()
-                ui.button("⚙", on_click=open_settings).props("flat round dense").classes("text-gray-400").tooltip("Настройки")
+                ui.button(icon="settings", on_click=open_settings).props("flat round dense").classes("text-gray-400").tooltip("Настройки")
                 def open_logs():
                     state["plugin"] = LOGS_SENTINEL
                     plugin_panel.refresh()
@@ -869,7 +919,7 @@ async def _startup_update_check():
         action = "Настройки → Обновления" if Path(".git").exists() else f"github.com/{GITHUB_REPO}/releases/latest"
         ui.notify(
             f"Доступна новая версия {tag}. {action}",
-            type="info", timeout=8000,
+            type="info", timeout=0, close_button="✕",
         )
 
 ui.timer(2.0, _startup_update_check, once=True)

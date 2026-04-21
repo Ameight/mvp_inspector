@@ -18,7 +18,7 @@ from pathlib import Path
 PLUGINS_DIR = Path("plugins")
 
 TEMPLATE = '''\
-from plugins.base_plugin import PluginInterface
+from sdk.base_plugin import PluginInterface
 
 
 class {class_name}(PluginInterface):

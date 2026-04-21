@@ -1,5 +1,6 @@
 app:
   title: TL IDE
+  plugins_dir: plugins   # абсолютный путь или относительный к расположению main.py
 
 marketplaces:
   - name: Official

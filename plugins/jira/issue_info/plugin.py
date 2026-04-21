@@ -1,7 +1,7 @@
 import os
 import requests
 from requests.auth import HTTPBasicAuth
-from plugins.base_plugin import PluginInterface
+from sdk.base_plugin import PluginInterface
 
 
 class JiraIssueInfoPlugin(PluginInterface):
