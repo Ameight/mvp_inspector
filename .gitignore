@@ -1,6 +1,7 @@
 /.idea
 .git
 .env
+config.yaml
 __pycache__/
 .DS_Store
 /.claude/

@@ -24,7 +24,11 @@ update_state: dict = {"latest_release": None, "checked": False, "error": None, "
 #   1. Переменная окружения TL_IDE_CONFIG
 #   2. ~/.tl-ide/config.yaml (пользовательский уровень, вне проекта)
 #   3. <папка main.py>/config.yaml (dev-режим / fallback)
+# При первом запуске, если конфиг не найден нигде — копируем config.example.yaml
 load_dotenv()
+
+_APP_DIR = Path(__file__).parent
+_EXAMPLE_CONFIG = _APP_DIR / "config.example.yaml"
 
 def _resolve_config_path() -> Path:
     if env := os.environ.get("TL_IDE_CONFIG"):
@@ -32,9 +36,13 @@ def _resolve_config_path() -> Path:
     home_cfg = Path.home() / ".tl-ide" / "config.yaml"
     if home_cfg.exists():
         return home_cfg
-    return Path(__file__).parent / "config.yaml"
+    return _APP_DIR / "config.yaml"
 
 CONFIG_PATH = _resolve_config_path()
+
+if not CONFIG_PATH.exists() and _EXAMPLE_CONFIG.exists():
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_EXAMPLE_CONFIG, CONFIG_PATH)
 
 if CONFIG_PATH.exists():
     with open(CONFIG_PATH) as f:
@@ -709,20 +717,24 @@ def plugin_panel():
         plugins_dir_input = ui.input(value=str(PLUGINS_DIR)).classes("flex-1 font-mono text-sm").props("outlined dense")
 
         async def _pick_plugins_folder():
+            # tkinter требует главный поток (macOS: NSWindow crash в asyncio.to_thread).
+            # Запускаем диалог в отдельном subprocess — у него свой главный поток.
+            initial = plugins_dir_input.value or str(PLUGINS_DIR)
+            script = (
+                "import tkinter as tk, sys\n"
+                "from tkinter import filedialog\n"
+                "root = tk.Tk(); root.withdraw(); root.wm_attributes('-topmost', True)\n"
+                f"p = filedialog.askdirectory(title='Папка с плагинами', initialdir={repr(initial)})\n"
+                "root.destroy(); print(p, end='')"
+            )
             try:
-                import tkinter as tk
-                from tkinter import filedialog
-                def _dialog():
-                    root = tk.Tk()
-                    root.withdraw()
-                    root.wm_attributes("-topmost", True)
-                    path = filedialog.askdirectory(
-                        title="Папка с плагинами",
-                        initialdir=plugins_dir_input.value or str(PLUGINS_DIR),
+                result = await asyncio.to_thread(
+                    lambda: subprocess.run(
+                        [sys.executable, "-c", script],
+                        capture_output=True, text=True, timeout=120,
                     )
-                    root.destroy()
-                    return path
-                chosen = await asyncio.to_thread(_dialog)
+                )
+                chosen = result.stdout.strip()
                 if chosen:
                     plugins_dir_input.set_value(chosen)
             except Exception:
