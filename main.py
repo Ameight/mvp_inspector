@@ -15,13 +15,27 @@ from sdk.base_plugin import PluginInterface, app_log, _logs
 import asyncio
 from collections import defaultdict
 
-CONFIG_PATH = Path("config.yaml")
 VERSION_PATH = Path("VERSION")
 GITHUB_REPO = "Ameight/mvp_inspector"
 update_state: dict = {"latest_release": None, "checked": False, "error": None, "update_done": None, "banner_dismissed": False}
 
 # === Конфигурация
+# Порядок поиска config.yaml:
+#   1. Переменная окружения TL_IDE_CONFIG
+#   2. ~/.tl-ide/config.yaml (пользовательский уровень, вне проекта)
+#   3. <папка main.py>/config.yaml (dev-режим / fallback)
 load_dotenv()
+
+def _resolve_config_path() -> Path:
+    if env := os.environ.get("TL_IDE_CONFIG"):
+        return Path(env).expanduser()
+    home_cfg = Path.home() / ".tl-ide" / "config.yaml"
+    if home_cfg.exists():
+        return home_cfg
+    return Path(__file__).parent / "config.yaml"
+
+CONFIG_PATH = _resolve_config_path()
+
 if CONFIG_PATH.exists():
     with open(CONFIG_PATH) as f:
         config = yaml.safe_load(f) or {}
@@ -100,6 +114,8 @@ async def do_update(tag: str) -> None:
         app_log(msg, level="warning", source="updater")
         ui.notify(msg, type="warning", timeout=8000)
         return
+    # Сохраняем конфиг до git checkout — он может перезаписать config.yaml
+    config_backup = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else None
     spinner = ui.notification("Обновление...", spinner=True, timeout=None)
     try:
         app_log(f"Начинаем обновление до {tag}", source="updater")
@@ -111,6 +127,9 @@ async def do_update(tag: str) -> None:
             ["git", "checkout", tag], check=True, capture_output=True
         ))
         app_log(f"git checkout {tag} — OK", source="updater")
+        if config_backup is not None:
+            CONFIG_PATH.write_text(config_backup, encoding="utf-8")
+            app_log("config.yaml восстановлен", source="updater")
         await asyncio.to_thread(lambda: subprocess.run(
             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
             check=True, capture_output=True,
@@ -121,6 +140,8 @@ async def do_update(tag: str) -> None:
         plugin_panel.refresh()
     except subprocess.CalledProcessError as e:
         spinner.dismiss()
+        if config_backup is not None:
+            CONFIG_PATH.write_text(config_backup, encoding="utf-8")
         err = (e.stderr or b"").decode(errors="replace")
         full_err = err or str(e)
         app_log(f"Ошибка обновления: {full_err}", level="error", source="updater")
@@ -436,12 +457,15 @@ def plugin_panel():
             ]
             status_label.set_text(f"{len(filtered)} плагинов" if filtered else "Ничего не найдено")
             current_manifest = load_manifest()
+            local_v = get_local_version()
             with cards_column:
                 for entry in filtered:
                     plugin_id = entry.get("id", "")
                     installed = is_installed(plugin_id)
                     integrity_ok = check_integrity(plugin_id, current_manifest) if installed else True
                     mp_name = entry.get("_marketplace", "")
+                    min_app_v = entry.get("min_app_version", "")
+                    compat = not min_app_v or parse_version(local_v) >= parse_version(min_app_v)
                     with ui.card().classes("w-full"):
                         with ui.row().classes("items-start justify-between w-full"):
                             with ui.column().classes("gap-0"):
@@ -450,6 +474,8 @@ def plugin_panel():
                                     ui.badge(entry.get("category", ""), color="blue").props("outline")
                                     if len(MARKETPLACES) > 1:
                                         ui.badge(mp_name, color="teal").props("outline")
+                                    if min_app_v:
+                                        ui.badge(f"app ≥ {min_app_v}", color="grey").props("outline")
                                 ui.label(entry.get("description", "")).classes("text-gray-400 text-sm")
                                 requires = entry.get("requires", [])
                                 if requires:
@@ -482,9 +508,12 @@ def plugin_panel():
                                     elif installed_v:
                                         ui.label(f"v{installed_v}").classes("text-gray-500 text-xs mt-1")
                                 else:
-                                    async def install(e=entry):
-                                        await do_install(e)
-                                    ui.button("Установить", on_click=install).props("dense unelevated").classes("text-sm")
+                                    if compat:
+                                        async def install(e=entry):
+                                            await do_install(e)
+                                        ui.button("Установить", on_click=install).props("dense unelevated").classes("text-sm")
+                                    else:
+                                        ui.label(f"Требуется приложение ≥ {min_app_v}").classes("text-orange-400 text-xs text-right")
                                 ui.label(f"v{entry.get('version', '?')}  ·  {entry.get('author', '?')}").classes("text-gray-600 text-xs")
 
         async def do_install(entry: dict):
@@ -492,6 +521,13 @@ def plugin_panel():
             raw_url = entry.get("raw_url", "")
             requires = entry.get("requires", [])
             mp_name = entry.get("_marketplace", MARKETPLACES[0]["name"] if MARKETPLACES else "")
+            min_app_v = entry.get("min_app_version", "")
+            if min_app_v and parse_version(get_local_version()) < parse_version(min_app_v):
+                ui.notify(
+                    f"Плагин «{entry.get('name')}» требует приложение ≥ {min_app_v} (у тебя {get_local_version()}). Обнови приложение.",
+                    type="warning", timeout=8000,
+                )
+                return
             dest = PLUGINS_DIR / plugin_id / "plugin.py"
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -669,13 +705,70 @@ def plugin_panel():
 
         ui.separator().classes("my-4")
         ui.label("Плагины").classes("text-lg font-semibold mb-2")
-        with ui.row().classes("items-center gap-2 mb-1"):
-            ui.icon("folder", color="grey").classes("text-sm")
-            ui.label(str(PLUGINS_DIR)).classes("text-gray-400 text-sm font-mono")
-        ui.label("Путь задаётся в config.yaml → app.plugins_dir (абсолютный или относительный к main.py)").classes("text-gray-600 text-xs mb-1")
+
+        plugins_dir_input = ui.input(value=str(PLUGINS_DIR)).classes("flex-1 font-mono text-sm").props("outlined dense")
+
+        async def _pick_plugins_folder():
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+                def _dialog():
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.wm_attributes("-topmost", True)
+                    path = filedialog.askdirectory(
+                        title="Папка с плагинами",
+                        initialdir=plugins_dir_input.value or str(PLUGINS_DIR),
+                    )
+                    root.destroy()
+                    return path
+                chosen = await asyncio.to_thread(_dialog)
+                if chosen:
+                    plugins_dir_input.set_value(chosen)
+            except Exception:
+                ui.notify("Нативный диалог недоступен — введи путь вручную", type="info")
+
+        def _save_plugins_dir():
+            new_path = plugins_dir_input.value.strip()
+            if not new_path:
+                ui.notify("Путь не может быть пустым", type="warning")
+                return
+            p = Path(new_path).expanduser()
+            if not p.exists():
+                try:
+                    p.mkdir(parents=True)
+                except Exception as e:
+                    ui.notify(f"Не удалось создать папку: {e}", type="negative")
+                    return
+            try:
+                raw = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
+                cfg = yaml.safe_load(raw) or {}
+                if "app" not in cfg or cfg["app"] is None:
+                    cfg["app"] = {}
+                cfg["app"]["plugins_dir"] = new_path
+                CONFIG_PATH.write_text(yaml.dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+                ui.notify("Сохранено. Перезапусти приложение для применения.", type="positive")
+            except Exception as e:
+                ui.notify(f"Ошибка сохранения: {e}", type="negative")
+
+        with ui.row().classes("items-center gap-2 w-full mb-1"):
+            plugins_dir_input
+            ui.button(icon="folder_open", on_click=_pick_plugins_folder).props("flat round dense color=grey-5").tooltip("Выбрать папку")
+            ui.button(icon="save", on_click=_save_plugins_dir).props("flat round dense color=primary").tooltip("Сохранить")
+        ui.label("Абсолютный или относительный к main.py путь. Сохраняется в config.yaml.").classes("text-gray-600 text-xs mb-1")
 
         ui.separator().classes("my-4")
         ui.label("config.yaml").classes("text-lg font-semibold mb-2")
+        with ui.row().classes("items-center gap-2 mb-1"):
+            ui.icon("description", color="grey").classes("text-sm")
+            ui.label(str(CONFIG_PATH)).classes("text-gray-400 text-sm font-mono")
+        if os.environ.get("TL_IDE_CONFIG"):
+            _cfg_source = "из TL_IDE_CONFIG"
+        elif CONFIG_PATH == Path.home() / ".tl-ide" / "config.yaml":
+            _cfg_source = "из ~/.tl-ide/"
+        else:
+            _cfg_source = "dev-режим (рядом с main.py)"
+        ui.label(f"Источник: {_cfg_source}. Для prod вынеси в ~/.tl-ide/config.yaml или задай TL_IDE_CONFIG.").classes("text-gray-600 text-xs mb-3")
         yaml_content = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
         config_area = ui.textarea(value=yaml_content).classes("w-full font-mono text-sm").props("rows=20 outlined")
 
