@@ -1,5 +1,18 @@
 from abc import ABC, abstractmethod
+import datetime
 import re
+
+_logs: list[dict] = []
+
+
+def app_log(message: str, level: str = "info", source: str = "app") -> None:
+    _logs.append({
+        "ts": datetime.datetime.now(),
+        "level": level,
+        "source": source,
+        "message": message,
+    })
+    print(f"[{level.upper()}] [{source}] {message}")
 
 
 class PluginInterface(ABC):
@@ -90,6 +103,9 @@ class PluginInterface(ABC):
     def is_enabled(self) -> bool:
         """False — плагин не загружается."""
         return True
+
+    def log(self, message: str, level: str = "info") -> None:
+        app_log(message, level=level, source=self.get_display_name())
 
     def get_required_env(self) -> dict:
         """

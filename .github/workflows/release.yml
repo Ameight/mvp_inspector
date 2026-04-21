@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set VERSION from tag
+        run: echo "${{ github.ref_name }}" | sed 's/^v//' > VERSION
+
+      - name: Build ZIP
+        run: |
+          TAG=${{ github.ref_name }}
+          DIST=dist/TL_IDE
+
+          mkdir -p "$DIST"
+
+          cp main.py create_plugin.py requirements.txt VERSION Makefile run.sh run.bat README.md "$DIST/"
+          cp config.yaml "$DIST/config.yaml.example"
+          cp -r plugins "$DIST/plugins"
+
+          # убираем лишнее
+          find "$DIST" -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          rm -f "$DIST/plugins/manifest.json"
+
+          chmod +x "$DIST/run.sh"
+
+          cd dist
+          zip -r "TL_IDE_${TAG}.zip" TL_IDE/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ github.ref_name }} \
+            "dist/TL_IDE_${{ github.ref_name }}.zip" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

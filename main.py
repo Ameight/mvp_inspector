@@ -11,7 +11,7 @@ import sys
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
-from plugins.base_plugin import PluginInterface
+from plugins.base_plugin import PluginInterface, app_log, _logs
 import asyncio
 from collections import defaultdict
 
@@ -79,38 +79,46 @@ async def fetch_latest_release() -> dict | None:
                 headers={"Accept": "application/vnd.github+json"},
             )
         )
-        return resp.json() if resp.status_code == 200 else None
-    except Exception:
+        if resp.status_code == 200:
+            return resp.json()
+        app_log(f"GitHub API вернул {resp.status_code}: {resp.text[:300]}", level="error", source="updater")
+        return None
+    except Exception as e:
+        app_log(f"Ошибка соединения с GitHub: {e}", level="error", source="updater")
         return None
 
 
 async def do_update(tag: str) -> None:
     dirty = get_dirty_tracked_files()
     if dirty:
-        ui.notify(
-            f"Незафиксированные изменения: {', '.join(dirty[:3])}{'...' if len(dirty) > 3 else ''}. "
-            "Сделай git stash или commit перед обновлением.",
-            type="warning", timeout=8000,
-        )
+        msg = f"Незафиксированные изменения: {', '.join(dirty[:3])}{'...' if len(dirty) > 3 else ''}. Сделай git stash или commit перед обновлением."
+        app_log(msg, level="warning", source="updater")
+        ui.notify(msg, type="warning", timeout=8000)
         return
     spinner = ui.notification("Обновление...", spinner=True, timeout=None)
     try:
+        app_log(f"Начинаем обновление до {tag}", source="updater")
         await asyncio.to_thread(lambda: subprocess.run(
             ["git", "fetch", "--tags"], check=True, capture_output=True
         ))
+        app_log("git fetch --tags — OK", source="updater")
         await asyncio.to_thread(lambda: subprocess.run(
             ["git", "checkout", tag], check=True, capture_output=True
         ))
+        app_log(f"git checkout {tag} — OK", source="updater")
         await asyncio.to_thread(lambda: subprocess.run(
             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
             check=True, capture_output=True,
         ))
+        app_log("pip install — OK", source="updater")
         spinner.dismiss()
         ui.notify(f"✅ Обновлено до {tag}. Перезапусти приложение.", type="positive", timeout=0)
     except subprocess.CalledProcessError as e:
         spinner.dismiss()
         err = (e.stderr or b"").decode(errors="replace")
-        ui.notify(f"❌ Ошибка обновления: {err[:200] or str(e)}", type="negative", timeout=10000)
+        full_err = err or str(e)
+        app_log(f"Ошибка обновления: {full_err}", level="error", source="updater")
+        ui.notify(f"❌ Ошибка обновления: {full_err[:200]}", type="negative", timeout=10000)
 
 
 def check_integrity(plugin_id: str, manifest: dict) -> bool:
@@ -167,6 +175,7 @@ for p in loaded_plugins:
 NEW_PLUGIN_SENTINEL = "__new_plugin__"
 MARKETPLACE_SENTINEL = "__marketplace__"
 SETTINGS_SENTINEL = "__settings__"
+LOGS_SENTINEL = "__logs__"
 MARKETPLACES: list[dict] = config.get("marketplaces", [
     {"name": "Official", "url": "https://raw.githubusercontent.com/Ameight/tl-ide-plugins/master/registry.json"}
 ])
@@ -525,6 +534,31 @@ def plugin_panel():
         ui.timer(0.05, load_registry, once=True)
         return
 
+    if p is LOGS_SENTINEL:
+        _level_colors = {"info": "grey", "warning": "orange", "error": "red", "debug": "blue-grey"}
+        with ui.row().classes("items-center justify-between w-full mb-4"):
+            ui.label("Логи").classes("text-2xl font-bold")
+            with ui.row().classes("gap-2"):
+                ui.button("Обновить", on_click=plugin_panel.refresh).props("flat dense")
+                def _clear_logs():
+                    _logs.clear()
+                    plugin_panel.refresh()
+                ui.button("Очистить", on_click=_clear_logs).props("flat dense color=red-4")
+        if not _logs:
+            ui.label("Нет записей").classes("text-gray-500 text-sm")
+            return
+        with ui.column().classes("w-full gap-0"):
+            for entry in reversed(_logs):
+                level = entry["level"]
+                color = _level_colors.get(level, "grey")
+                ts = entry["ts"].strftime("%H:%M:%S")
+                with ui.row().classes("items-start gap-2 w-full py-2 px-1").style("border-bottom: 1px solid #222;"):
+                    ui.label(ts).classes("text-gray-500 shrink-0 text-xs font-mono pt-0.5 w-16")
+                    ui.badge(level, color=color).props("outline").classes("shrink-0")
+                    ui.label(entry["source"]).classes("text-blue-400 shrink-0 text-xs font-mono pt-0.5 w-24 truncate")
+                    ui.label(entry["message"]).classes("text-gray-200 text-sm break-all")
+        return
+
     if p is SETTINGS_SENTINEL:
         ui.label("Настройки").classes("text-2xl font-bold mb-1")
         ui.label("Переменные окружения и конфигурация плагинов.").classes("text-gray-400 text-sm mb-6")
@@ -630,6 +664,8 @@ def plugin_panel():
         if upd_err:
             ui.label(f"Ошибка: {upd_err}").classes("text-red-400 text-sm mb-2")
 
+        is_git_repo = Path(".git").exists()
+
         upd_release = update_state.get("latest_release")
         if update_state.get("checked") and upd_release:
             upd_tag = upd_release.get("tag_name", "")
@@ -641,9 +677,14 @@ def plugin_panel():
                     upd_body = upd_release.get("body", "")
                     if upd_body:
                         ui.markdown(upd_body[:600]).classes("text-sm mb-3")
-                    async def _do_update_click(t=upd_tag):
-                        await do_update(t)
-                    ui.button(f"Обновить до {upd_tag}", on_click=_do_update_click).props("unelevated color=positive")
+                    if is_git_repo:
+                        async def _do_update_click(t=upd_tag):
+                            await do_update(t)
+                        ui.button(f"Обновить до {upd_tag}", on_click=_do_update_click).props("unelevated color=positive")
+                    else:
+                        download_url = upd_release.get("html_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
+                        ui.label("Скачай новую версию:").classes("text-gray-400 text-sm mb-1")
+                        ui.link(download_url, download_url, new_tab=True).classes("text-blue-400 text-sm break-all")
             else:
                 with ui.row().classes("items-center gap-2 mb-3"):
                     ui.icon("check_circle", color="green")
@@ -764,6 +805,7 @@ def plugin_panel():
             result_store["text"] = text
             output_area.content = text
         except Exception as e:
+            app_log(str(e), level="error", source=p.get_display_name())
             output_area.content = f"❌ **Ошибка:**\n```\n{e}\n```"
         finally:
             run_button.set_text("▶ Запустить")
@@ -805,6 +847,10 @@ with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
                     state["plugin"] = SETTINGS_SENTINEL
                     plugin_panel.refresh()
                 ui.button("⚙", on_click=open_settings).props("flat round dense").classes("text-gray-400").tooltip("Настройки")
+                def open_logs():
+                    state["plugin"] = LOGS_SENTINEL
+                    plugin_panel.refresh()
+                ui.button(icon="bug_report", on_click=open_logs).props("flat round dense").classes("text-gray-400").tooltip("Логи")
 
         sidebar_panel()
 
@@ -820,8 +866,9 @@ async def _startup_update_check():
     update_state["checked"] = True
     tag = rel.get("tag_name", "")
     if parse_version(tag) > parse_version(get_local_version()):
+        action = "Настройки → Обновления" if Path(".git").exists() else f"github.com/{GITHUB_REPO}/releases/latest"
         ui.notify(
-            f"Доступна новая версия {tag}. Перейди в Настройки → Обновления.",
+            f"Доступна новая версия {tag}. {action}",
             type="info", timeout=8000,
         )
 
