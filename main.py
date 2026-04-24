@@ -28,6 +28,7 @@ load_dotenv()
 
 _APP_DIR = Path(__file__).parent
 _EXAMPLE_CONFIG = _APP_DIR / "config.example.yaml"
+_HOME_CFG = Path.home() / ".tl-ide" / "config.yaml"
 
 def _resolve_config_path() -> Path:
     if env := os.environ.get("TL_IDE_CONFIG"):
@@ -38,6 +39,13 @@ def _resolve_config_path() -> Path:
     return _APP_DIR / "config.yaml"
 
 CONFIG_PATH = _resolve_config_path()
+
+# Первый запуск: пользователь ещё не выбирал расположение настроек.
+# Не показываем wizard при dev-запуске если ~/.tl-ide уже существует или задан TL_IDE_CONFIG.
+_IS_FIRST_RUN = (
+    not os.environ.get("TL_IDE_CONFIG")
+    and not _HOME_CFG.exists()
+)
 
 if not CONFIG_PATH.exists() and _EXAMPLE_CONFIG.exists():
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -257,6 +265,28 @@ def save_env_vars(updates: dict) -> None:
         else:
             lines.append(f"{key}={value}")
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+async def _pick_folder(title: str, initial: str) -> str | None:
+    """Открывает нативный диалог выбора папки.
+    Возвращает путь, '' если пользователь отменил, None если диалог недоступен."""
+    script = (
+        "import tkinter as tk, sys\n"
+        "from tkinter import filedialog\n"
+        "root = tk.Tk(); root.withdraw(); root.wm_attributes('-topmost', True)\n"
+        f"p = filedialog.askdirectory(title={repr(title)}, initialdir={repr(initial)})\n"
+        "root.destroy(); print(p, end='')"
+    )
+    try:
+        result = await asyncio.to_thread(
+            lambda: subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True, text=True, timeout=120,
+            )
+        )
+        return result.stdout.strip()
+    except Exception:
+        return None
 
 
 def delete_plugin(plugin: PluginInterface) -> None:
@@ -728,27 +758,10 @@ def plugin_panel():
         ui.label("Плагины").classes("text-lg font-semibold mb-2")
 
         async def _pick_plugins_folder():
-            # tkinter требует главный поток (macOS: NSWindow crash в asyncio.to_thread).
-            # Запускаем диалог в отдельном subprocess — у него свой главный поток.
-            initial = plugins_dir_input.value or str(PLUGINS_DIR)
-            script = (
-                "import tkinter as tk, sys\n"
-                "from tkinter import filedialog\n"
-                "root = tk.Tk(); root.withdraw(); root.wm_attributes('-topmost', True)\n"
-                f"p = filedialog.askdirectory(title='Папка с плагинами', initialdir={repr(initial)})\n"
-                "root.destroy(); print(p, end='')"
-            )
-            try:
-                result = await asyncio.to_thread(
-                    lambda: subprocess.run(
-                        [sys.executable, "-c", script],
-                        capture_output=True, text=True, timeout=120,
-                    )
-                )
-                chosen = result.stdout.strip()
-                if chosen:
-                    plugins_dir_input.set_value(chosen)
-            except Exception:
+            chosen = await _pick_folder("Папка с плагинами", plugins_dir_input.value or str(PLUGINS_DIR))
+            if chosen:
+                plugins_dir_input.set_value(chosen)
+            elif chosen is None:
                 ui.notify("Нативный диалог недоступен — введи путь вручную", type="info")
 
         def _save_plugins_dir():
@@ -989,6 +1002,77 @@ def plugin_panel():
     copy_button.on("click", copy_output)
 
 
+# === Wizard первого запуска
+def show_setup_wizard():
+    if not _IS_FIRST_RUN:
+        return
+
+    default_cfg_dir = str(Path.home() / ".tl-ide")
+    default_plugins_dir = str(Path.home() / ".tl-ide" / "plugins")
+
+    with ui.dialog().props("persistent") as dlg, ui.card().classes("w-full max-w-lg"):
+        ui.label("Добро пожаловать в TL IDE").classes("text-2xl font-bold mb-1")
+        ui.label(
+            "Выбери, где хранить настройки и плагины. Можно изменить позже в Настройках."
+        ).classes("text-gray-400 text-sm mb-6")
+
+        ui.label("Папка настроек (config.yaml)").classes("text-sm font-semibold mb-1")
+        with ui.row().classes("w-full gap-2 mb-4 items-center"):
+            cfg_input = ui.input(value=default_cfg_dir).classes("flex-1 font-mono text-sm").props("outlined dense")
+            async def pick_cfg():
+                chosen = await _pick_folder("Папка настроек", cfg_input.value)
+                if chosen:
+                    cfg_input.set_value(chosen)
+                elif chosen is None:
+                    ui.notify("Нативный диалог недоступен — введи путь вручную", type="info")
+            ui.button(icon="folder_open", on_click=pick_cfg).props("flat round dense color=grey-5").tooltip("Выбрать папку")
+
+        ui.label("Папка плагинов").classes("text-sm font-semibold mb-1")
+        with ui.row().classes("w-full gap-2 mb-6 items-center"):
+            plugins_input = ui.input(value=default_plugins_dir).classes("flex-1 font-mono text-sm").props("outlined dense")
+            async def pick_plugins():
+                chosen = await _pick_folder("Папка плагинов", plugins_input.value)
+                if chosen:
+                    plugins_input.set_value(chosen)
+                elif chosen is None:
+                    ui.notify("Нативный диалог недоступен — введи путь вручную", type="info")
+            ui.button(icon="folder_open", on_click=pick_plugins).props("flat round dense color=grey-5").tooltip("Выбрать папку")
+
+        async def do_setup():
+            cfg_dir = Path(cfg_input.value.strip()).expanduser()
+            plugins_dir_path = Path(plugins_input.value.strip()).expanduser()
+            if not cfg_input.value.strip() or not plugins_input.value.strip():
+                ui.notify("Заполни оба поля", type="warning")
+                return
+            try:
+                cfg_dir.mkdir(parents=True, exist_ok=True)
+                plugins_dir_path.mkdir(parents=True, exist_ok=True)
+                new_cfg = cfg_dir / "config.yaml"
+                if _EXAMPLE_CONFIG.exists():
+                    shutil.copy(_EXAMPLE_CONFIG, new_cfg)
+                else:
+                    new_cfg.write_text("app:\n  title: TL IDE\n", encoding="utf-8")
+                raw = new_cfg.read_text(encoding="utf-8")
+                cfg_data = yaml.safe_load(raw) or {}
+                if not cfg_data.get("app"):
+                    cfg_data["app"] = {}
+                cfg_data["app"]["plugins_dir"] = str(plugins_dir_path)
+                new_cfg.write_text(
+                    yaml.dump(cfg_data, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8",
+                )
+                dlg.close()
+                ui.notify("Готово! Перезапускаю приложение...", type="positive", timeout=2000)
+                await asyncio.sleep(1.5)
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception as e:
+                ui.notify(f"Ошибка: {e}", type="negative", timeout=8000)
+
+        ui.button("Начать →", on_click=do_setup).props("unelevated color=primary").classes("w-full")
+
+    dlg.open()
+
+
 # === Layout
 ui.dark_mode().enable()
 
@@ -1038,6 +1122,7 @@ async def _startup_update_check():
             type="info", timeout=0, close_button="✕",
         )
 
+ui.timer(0.05, show_setup_wizard, once=True)
 ui.timer(2.0, _startup_update_check, once=True)
 
 ui.run(title="TL IDE", favicon="🛠️")
