@@ -721,8 +721,6 @@ def plugin_panel():
         ui.separator().classes("my-4")
         ui.label("Плагины").classes("text-lg font-semibold mb-2")
 
-        plugins_dir_input = ui.input(value=str(PLUGINS_DIR)).classes("flex-1 font-mono text-sm").props("outlined dense")
-
         async def _pick_plugins_folder():
             # tkinter требует главный поток (macOS: NSWindow crash в asyncio.to_thread).
             # Запускаем диалог в отдельном subprocess — у него свой главный поток.
@@ -771,16 +769,16 @@ def plugin_panel():
                 ui.notify(f"Ошибка сохранения: {e}", type="negative")
 
         with ui.row().classes("items-center gap-2 w-full mb-1"):
-            plugins_dir_input
+            plugins_dir_input = ui.input(value=str(PLUGINS_DIR)).classes("flex-1 font-mono text-sm").props("outlined dense")
             ui.button(icon="folder_open", on_click=_pick_plugins_folder).props("flat round dense color=grey-5").tooltip("Выбрать папку")
             ui.button(icon="save", on_click=_save_plugins_dir).props("flat round dense color=primary").tooltip("Сохранить")
         ui.label("Абсолютный или относительный к main.py путь. Сохраняется в config.yaml.").classes("text-gray-600 text-xs mb-1")
 
         ui.separator().classes("my-4")
         ui.label("config.yaml").classes("text-lg font-semibold mb-2")
-        with ui.row().classes("items-center gap-2 mb-1"):
-            ui.icon("description", color="grey").classes("text-sm")
-            ui.label(str(CONFIG_PATH)).classes("text-gray-400 text-sm font-mono")
+        with ui.row().classes("items-center gap-2 mb-1 w-full"):
+            ui.icon("description", color="grey").classes("text-sm shrink-0")
+            ui.input(value=str(CONFIG_PATH)).classes("flex-1 font-mono text-sm").props("outlined dense readonly")
         if os.environ.get("TL_IDE_CONFIG"):
             _cfg_source = "из TL_IDE_CONFIG"
         elif CONFIG_PATH == Path.home() / ".tl-ide" / "config.yaml":
