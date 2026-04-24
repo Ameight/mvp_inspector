@@ -15,7 +15,6 @@ from sdk.base_plugin import PluginInterface, app_log, _logs
 import asyncio
 from collections import defaultdict
 
-VERSION_PATH = Path("VERSION")
 GITHUB_REPO = "Ameight/mvp_inspector"
 update_state: dict = {"latest_release": None, "checked": False, "error": None, "update_done": None, "banner_dismissed": False}
 
@@ -79,7 +78,14 @@ def compute_sha256(path: Path) -> str:
 
 
 def get_local_version() -> str:
-    return VERSION_PATH.read_text(encoding="utf-8").strip() if VERSION_PATH.exists() else "0.0.0"
+    try:
+        r = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            capture_output=True, text=True, check=True,
+        )
+        return r.stdout.strip()
+    except Exception:
+        return "0.0.0"
 
 
 def parse_version(v: str) -> tuple[int, ...]:

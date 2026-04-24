@@ -2,6 +2,7 @@
 .git
 .env
 config.yaml
+VERSION
 __pycache__/
 .DS_Store
 /.claude/
