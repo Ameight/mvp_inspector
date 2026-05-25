@@ -8,16 +8,21 @@ else
 	VENV_PYTHON = .venv/bin/python
 endif
 
-.PHONY: help install run plugin
+.PHONY: help install update run plugin
 
 help:
 	@echo "Использование:"
 	@echo "  make install              Создать venv и установить зависимости"
+	@echo "  make update               Обновить код и зависимости (dev-режим, ветка master)"
 	@echo "  make run                  Запустить приложение"
 	@echo "  make plugin name=<name>   Создать плагин (категория опциональна: category=<cat>)"
 
 install:
 	python -m venv .venv
+	$(VENV_PIP) install -r requirements.txt
+
+update:
+	git pull origin master
 	$(VENV_PIP) install -r requirements.txt
 
 run:
