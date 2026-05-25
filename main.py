@@ -1,4 +1,4 @@
-from nicegui import ui
+from nicegui import ui, app as nicegui_app
 import importlib.util
 import hashlib
 import json
@@ -14,6 +14,13 @@ from dotenv import load_dotenv
 from sdk.base_plugin import PluginInterface, app_log, _logs
 import asyncio
 from collections import defaultdict
+
+def _restart_app() -> None:
+    """Корректный перезапуск: даём серверу остановиться, затем execv.
+    os.execv напрямую вызывает 'address already in use' — порт ещё занят uvicorn'ом."""
+    nicegui_app.on_shutdown(lambda: os.execv(sys.executable, [sys.executable] + sys.argv))
+    nicegui_app.shutdown()
+
 
 GITHUB_REPO = "Ameight/mvp_inspector"
 update_state: dict = {"latest_release": None, "checked": False, "error": None, "update_done": None, "banner_dismissed": False}
@@ -93,7 +100,13 @@ def get_local_version() -> str:
         )
         return r.stdout.strip()
     except Exception:
-        return "0.0.0"
+        pass
+    # Fallback for zip-release installs (no git / no .git dir).
+    # The VERSION file is written by the release workflow.
+    version_file = Path(__file__).parent / "VERSION"
+    if version_file.exists():
+        return version_file.read_text(encoding="utf-8").strip()
+    return "0.0.0"
 
 
 def parse_version(v: str) -> tuple[int, ...]:
@@ -837,9 +850,7 @@ def plugin_panel():
                 with ui.row().classes("items-center gap-2 mb-3"):
                     ui.icon("check_circle", color="green")
                     ui.label(f"Обновлено до {done_tag}. Перезапусти для применения.").classes("text-green-400 font-semibold")
-                def _restart():
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
-                ui.button("Перезапустить", icon="restart_alt", on_click=_restart).props("unelevated color=positive")
+                ui.button("Перезапустить", icon="restart_alt", on_click=_restart_app).props("unelevated color=positive")
 
         elif update_state.get("checked") and upd_release:
             upd_tag = upd_release.get("tag_name", "")
@@ -1064,7 +1075,7 @@ def show_setup_wizard():
                 dlg.close()
                 ui.notify("Готово! Перезапускаю приложение...", type="positive", timeout=2000)
                 await asyncio.sleep(1.5)
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                _restart_app()
             except Exception as e:
                 ui.notify(f"Ошибка: {e}", type="negative", timeout=8000)
 
