@@ -24,6 +24,8 @@ def _restart_app() -> None:
 
 GITHUB_REPO = "Ameight/mvp_inspector"
 update_state: dict = {"latest_release": None, "checked": False, "error": None, "update_done": None, "banner_dismissed": False}
+# Плагины, установленные в текущей сессии — показываем баннер с кнопкой перезапуска
+_installed_this_session: set[str] = set()
 
 # === Конфигурация
 # Порядок поиска config.yaml:
@@ -496,7 +498,16 @@ def plugin_panel():
 
     if p is MARKETPLACE_SENTINEL:
         ui.label("Marketplace").classes("text-2xl font-bold mb-1")
-        ui.label("Плагины из подключённых реестров. После установки перезапусти приложение.").classes("text-gray-400 text-sm mb-4")
+        ui.label("Плагины из подключённых реестров.").classes("text-gray-400 text-sm mb-4")
+
+        if _installed_this_session:
+            names = ", ".join(sorted(_installed_this_session))
+            with ui.card().classes("w-full mb-4").style("background: #0d2b0d; border: 1px solid #1a4a1a;"):
+                with ui.row().classes("items-center justify-between w-full"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon("check_circle", color="green")
+                        ui.label(f"Установлено: {names}").classes("text-green-400 text-sm")
+                    ui.button("Перезапустить", icon="restart_alt", on_click=_restart_app).props("unelevated color=positive dense")
 
         with ui.row().classes("w-full gap-3 mb-4"):
             search_input = ui.input(placeholder="Поиск по названию или категории...").classes("flex-1")
@@ -614,7 +625,8 @@ def plugin_panel():
                             check=True, capture_output=True,
                         )
                     )
-                ui.notify(f"✅ {entry.get('name')} установлен. Перезапусти приложение.", type="positive", timeout=6000)
+                _installed_this_session.add(entry.get("name", plugin_id))
+                ui.notify(f"✅ {entry.get('name')} установлен", type="positive", timeout=3000)
                 plugin_panel.refresh()
             except Exception as e:
                 ui.notify(f"❌ Ошибка установки: {e}", type="negative", timeout=8000)
