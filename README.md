@@ -18,6 +18,7 @@
   - [Обновления приложения](#обновления-приложения)
 - [Создание плагина](#создание-плагина)
 - [SDK плагина](#sdk-плагина)
+- [Создание своего маркетплейса](#создание-своего-маркетплейса)
 - [Структура проекта](#структура-проекта)
 
 ---
@@ -308,6 +309,188 @@ class MyPlugin(PluginInterface):
 
 **Секреты** (токены) — храни в `.env`, читай через `os.getenv("MY_TOKEN")`.  
 **Конфиг** (URL, настройки) — в `config.yaml` → `plugins.<get_config_key()>`, читай через `self.config.get("base_url")`.
+
+---
+
+## Создание своего маркетплейса
+
+Маркетплейс — это обычный JSON-файл (`registry.json`), доступный по HTTP. Приложение загружает его и показывает карточки плагинов. Никакого сервера не нужно — достаточно публичного GitHub-репозитория.
+
+### Быстрый старт
+
+1. Создай репозиторий на GitHub (например `your-org/my-plugins`).
+2. Добавь файл `registry.json` в корень.
+3. Рядом положи папки с плагинами:
+
+```
+my-plugins/
+├── registry.json
+├── devops/
+│   └── deploy_checker/
+│       └── plugin.py
+└── jira/
+    └── sprint_report/
+        └── plugin.py
+```
+
+4. Узнай `raw_url` любого файла (кнопка **Raw** в GitHub) — это и есть ссылка для установки.
+5. Подключи реестр в TL IDE: ⚙ Настройки → Маркетплейсы → введи название и URL к `registry.json` → **+**.
+
+URL реестра для GitHub выглядит так:
+```
+https://raw.githubusercontent.com/your-org/my-plugins/master/registry.json
+```
+
+---
+
+### Формат registry.json
+
+Файл — это JSON-массив объектов. Каждый объект описывает один плагин.
+
+```json
+[
+  {
+    "id": "devops/deploy_checker",
+    "name": "Deploy Checker",
+    "category": "DevOps",
+    "description": "Проверяет статус деплоя по тегу.",
+    "author": "your-name",
+    "version": "1.0.0",
+    "raw_url": "https://raw.githubusercontent.com/your-org/my-plugins/master/devops/deploy_checker/plugin.py",
+    "requires": ["requests"],
+    "min_app_version": "1.2.0"
+  },
+  {
+    "id": "jira/sprint_report",
+    "name": "Sprint Report",
+    "category": "Jira",
+    "description": "Сводка по спринту: закрыто/в работе/заблокировано.",
+    "author": "your-name",
+    "version": "2.1.0",
+    "raw_url": "https://raw.githubusercontent.com/your-org/my-plugins/master/jira/sprint_report/plugin.py",
+    "requires": ["requests", "tabulate"],
+    "versions": [
+      {
+        "version": "2.1.0",
+        "raw_url": "https://raw.githubusercontent.com/your-org/my-plugins/master/jira/sprint_report/plugin.py"
+      },
+      {
+        "version": "2.0.0",
+        "raw_url": "https://raw.githubusercontent.com/your-org/my-plugins/v2.0.0/jira/sprint_report/plugin.py"
+      },
+      {
+        "version": "1.9.0",
+        "raw_url": "https://raw.githubusercontent.com/your-org/my-plugins/v1.9.0/jira/sprint_report/plugin.py"
+      }
+    ]
+  }
+]
+```
+
+### Описание всех полей
+
+| Поле | Обязателен | Описание |
+|---|---|---|
+| `id` | ✅ | Уникальный идентификатор. Используется как путь установки: `<plugins_dir>/<id>/plugin.py` |
+| `name` | ✅ | Название плагина в карточке |
+| `category` | ✅ | Категория (используется для фильтрации и группировки после установки) |
+| `description` | — | Краткое описание в карточке |
+| `author` | — | Автор |
+| `version` | ✅ | Текущая версия в формате `X.Y.Z` |
+| `raw_url` | ✅ | Прямая ссылка на `plugin.py` для установки |
+| `requires` | — | Список pip-пакетов — устанавливаются автоматически при установке плагина |
+| `min_app_version` | — | Минимальная версия TL IDE. Если не выполнено — кнопка «Установить» скрывается |
+| `versions` | — | Массив версий для селектора. Если задан — пользователь может выбрать и установить любую |
+
+### Поле `versions` — мультиверсионность
+
+Если заполнено `versions`, в карточке появляется выпадающий список версий — пользователь может установить любую (обновить или откатить). Каждый элемент массива:
+
+```json
+{
+  "version": "2.0.0",
+  "raw_url": "https://raw.githubusercontent.com/your-org/my-plugins/v2.0.0/jira/sprint_report/plugin.py"
+}
+```
+
+> **Совет:** для мультиверсионности удобно использовать git-теги в репозитории плагинов. Для каждой версии создай тег (`v1.0.0`, `v2.0.0`) — тогда `raw_url` со ссылкой на тег всегда будет указывать на правильный файл.
+
+---
+
+### Шаблон plugin.py для маркетплейса
+
+Плагины в маркетплейсе ничем не отличаются от локальных — тот же `PluginInterface`. Но стоит придерживаться нескольких правил:
+
+```python
+"""
+Deploy Checker — проверяет статус деплоя.
+Автор: your-name
+Версия: 1.0.0
+Требует: requests
+"""
+import os
+import requests
+from sdk.base_plugin import PluginInterface
+
+
+class DeployChecker(PluginInterface):
+
+    def get_display_name(self) -> str:
+        return "Deploy Checker"
+
+    def get_description(self) -> str:
+        return "Проверяет статус деплоя по тегу."
+
+    def get_category(self) -> str:
+        return "DevOps"
+
+    def get_required_env(self) -> dict:
+        return {
+            "DEPLOY_TOKEN": {
+                "label": "Deploy API Token",
+                "description": "Токен для доступа к deploy-сервису",
+                "secret": True,
+            }
+        }
+
+    def get_config_schema(self) -> dict:
+        return {
+            "tag": {
+                "label": "Тег / версия",
+                "type": "string",
+                "default": "latest",
+            },
+            "env": {
+                "label": "Окружение",
+                "type": "select_or_input",
+                "options": ["production", "staging", "dev"],
+                "default": "staging",
+            },
+        }
+
+    def run(self, inputs: dict) -> str:
+        token = os.getenv("DEPLOY_TOKEN")
+        tag = inputs.get("tag", "latest")
+        env = inputs.get("env", "staging")
+
+        if not token:
+            return "❌ **DEPLOY_TOKEN не настроен.** Зайди в ⚙ Настройки → Переменные окружения."
+
+        # Здесь твоя логика
+        return f"**Статус деплоя `{tag}` в `{env}`:**\n\n✅ Успешно"
+```
+
+---
+
+### Чеклист перед публикацией плагина
+
+- [ ] `id` уникален и совпадает с папкой в репозитории
+- [ ] `raw_url` ведёт напрямую на `plugin.py` (проверь, что открывается в браузере — должен быть сырой Python-код, не HTML)
+- [ ] `version` обновлена
+- [ ] Все внешние зависимости перечислены в `requires`
+- [ ] Если плагин требует секреты — объявлены в `get_required_env()`
+- [ ] Плагин обрабатывает отсутствие токена и возвращает понятное сообщение об ошибке
+- [ ] Если нужна мультиверсионность — заполнено поле `versions`
 
 ---
 
