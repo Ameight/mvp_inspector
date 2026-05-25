@@ -16,9 +16,38 @@ import asyncio
 from collections import defaultdict
 
 def _restart_app() -> None:
-    """Корректный перезапуск: даём серверу остановиться, затем execv.
-    os.execv напрямую вызывает 'address already in use' — порт ещё занят uvicorn'ом."""
-    nicegui_app.on_shutdown(lambda: os.execv(sys.executable, [sys.executable] + sys.argv))
+    """Корректный перезапуск без 'address already in use'.
+
+    on_shutdown срабатывает до закрытия сокета (это внутри lifespan uvicorn'а),
+    поэтому os.execv в on_shutdown всё равно заходит на занятый порт.
+
+    Решение: запускаем независимый процесс-наблюдатель (start_new_session=True),
+    который опрашивает порт и стартует приложение только когда порт освободится.
+    Затем текущий процесс штатно останавливается через shutdown().
+    """
+    executable = sys.executable
+    argv = sys.argv[:]
+    port = 8080
+
+    watcher = f"""
+import socket, subprocess, time
+for _ in range(40):
+    time.sleep(0.25)
+    try:
+        s = socket.socket()
+        s.settimeout(0.1)
+        s.connect(('127.0.0.1', {port}))
+        s.close()
+    except OSError:
+        break
+subprocess.run({[executable] + argv!r})
+"""
+    subprocess.Popen(
+        [executable, "-c", watcher],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     nicegui_app.shutdown()
 
 
