@@ -21,6 +21,7 @@
 - [Запуск через systemd](#запуск-через-systemd)
 - [Приватный маркетплейс с API-ключом](#приватный-маркетплейс-с-api-ключом)
 - [Создание своего маркетплейса](#создание-своего-маркетплейса)
+- [Для разработчика](#для-разработчика)
 - [Структура проекта](#структура-проекта)
 
 ---
@@ -618,6 +619,144 @@ class DeployChecker(PluginInterface):
 - [ ] Если плагин требует секреты — объявлены в `get_required_env()`
 - [ ] Плагин обрабатывает отсутствие токена и возвращает понятное сообщение об ошибке
 - [ ] Если нужна мультиверсионность — заполнено поле `versions`
+
+---
+
+## Для разработчика
+
+### Быстрый старт
+
+```bash
+git clone https://github.com/Ameight/mvp_inspector.git
+cd mvp_inspector
+make install   # создаёт .venv и устанавливает зависимости
+make run       # запускает приложение
+```
+
+Приложение открывается в браузере: **http://localhost:8080**
+
+При первом запуске — wizard выбора папок. Для разработки удобно выбрать папки прямо внутри проекта или принять дефолт `~/.tl-ide/`.
+
+---
+
+### Команды Make
+
+| Команда | Описание |
+|---|---|
+| `make install` | Создать `.venv` и установить зависимости |
+| `make run` | Запустить приложение |
+| `make stop` | Остановить приложение (по PID-файлу или порту 8080) |
+| `make update` | `git pull origin master` + `pip install -r requirements.txt` |
+| `make plugin name=X [category=Y]` | Сгенерировать новый плагин по шаблону |
+| `make install-service` | Установить как systemd user-сервис (Linux) |
+| `make uninstall-service` | Удалить systemd сервис |
+| `make service-start/stop/status/logs` | Управление systemd сервисом |
+
+---
+
+### Архитектура
+
+Весь UI и логика живут в одном файле — `main.py`. NiceGUI рендерит интерфейс в браузере через WebSocket; сервер — uvicorn.
+
+**Ключевые концепции:**
+
+```
+main.py
+├── Конфиг — config.yaml (путь: TL_IDE_CONFIG > ~/.tl-ide/ > ./config.yaml)
+├── Плагины — загружаются из PLUGINS_DIR через importlib при старте
+├── Manifest — plugins/manifest.json, хранит метаданные marketplace-плагинов
+├── UI-состояние — dict state{"plugin"}, sentinel-объекты для спец. панелей
+└── Обновления — github API + git fetch/checkout + процесс-наблюдатель для рестарта
+```
+
+**Sentinel-объекты** — вместо роутинга используются константы:
+```python
+MARKETPLACE_SENTINEL   # → показывает панель маркетплейса
+SETTINGS_SENTINEL      # → показывает панель настроек
+LOGS_SENTINEL          # → показывает панель логов
+NEW_PLUGIN_SENTINEL    # → показывает инструкцию создания плагина
+```
+
+**Перезапуск приложения:**
+- Под systemd: `nicegui_app.shutdown()` → systemd поднимает сам
+- Без systemd: запускается процесс-наблюдатель, который ждёт освобождения порта 8080 и только потом стартует новый процесс
+
+---
+
+### Конфигурация в dev-режиме
+
+Порядок поиска `config.yaml`:
+1. Переменная окружения `TL_IDE_CONFIG`
+2. `~/.tl-ide/config.yaml`
+3. `./config.yaml` (рядом с `main.py`) — **dev fallback**
+
+Для изолированной разработки удобно:
+```bash
+export TL_IDE_CONFIG=./config.yaml
+make run
+```
+
+Секреты (токены) — в `.env` в корне проекта. Файл в `.gitignore`.
+
+---
+
+### Workflow выпуска релиза
+
+**Семантическое версионирование:**
+```
+v1.0.1  — hotfix (баг в существующей функции)
+v1.1.0  — новая функция (обратно совместима)
+v2.0.0  — breaking change
+```
+
+**Шаги:**
+
+```bash
+# 1. Убедиться что всё работает на master
+git log --oneline v1.1.0..HEAD   # посмотреть что войдёт в релиз
+
+# 2. Создать тег и запушить
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+GitHub Actions автоматически:
+- Соберёт **source ZIP** (`tl-ide-v1.2.0-source.zip`)
+- Соберёт **исполняемые файлы** через PyInstaller для Linux, Windows, macOS
+- Создаст **GitHub Release** со всеми артефактами
+
+> Тег не двигать и не удалять после публикации.
+
+**Создать релиз вручную** (если Actions не настроен):
+```bash
+gh release create v1.2.0 --title "v1.2.0" --generate-notes
+```
+
+---
+
+### Добавление зависимости
+
+```bash
+.venv/bin/pip install some-package
+.venv/bin/pip freeze | grep some-package >> requirements.txt
+# или вручную добавить в requirements.txt
+```
+
+---
+
+### Отладка
+
+Логи приложения и плагинов — кнопка 🐛 в шапке сайдбара.
+
+Из кода плагина:
+```python
+self.log("Сообщение для дебага", level="debug")
+```
+
+Логи сервера (если запущен через systemd):
+```bash
+make service-logs   # journalctl -f
+```
 
 ---
 
