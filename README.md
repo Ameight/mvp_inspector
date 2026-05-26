@@ -19,6 +19,7 @@
 - [Создание плагина](#создание-плагина)
 - [SDK плагина](#sdk-плагина)
 - [Запуск через systemd](#запуск-через-systemd)
+- [Приватный маркетплейс с API-ключом](#приватный-маркетплейс-с-api-ключом)
 - [Создание своего маркетплейса](#создание-своего-маркетплейса)
 - [Структура проекта](#структура-проекта)
 
@@ -361,6 +362,79 @@ systemctl --user restart tl-ide  # применить
 
 ```bash
 loginctl enable-linger $USER
+```
+
+---
+
+## Приватный маркетплейс с API-ключом
+
+Для внутрикорпоративных плагинов, которые не должны быть публично доступны.
+
+### Архитектура
+
+```
+[TL IDE клиент]  ──  X-API-Key: <ключ>  ──▶  [marketplace_server.py]
+                                                      │
+                                              проверяет ключ
+                                                      │
+                                              отдаёт registry.json
+                                              и plugin.py файлы
+```
+
+### Запуск сервера
+
+```bash
+# На сервере (или локально для теста)
+python marketplace_server.py
+```
+
+При первом запуске создаётся `marketplace_server.yaml` — отредактируй его:
+
+```yaml
+host: 0.0.0.0
+port: 9090
+plugins_dir: ./plugins    # папка с registry.json и плагинами
+
+api_keys:
+  - key: my-secret-key-abc123   # замени на свой ключ
+    name: "Team Alpha"
+  - key: another-key-xyz789
+    name: "Team Beta"
+```
+
+Добавь плагины в `plugins/` и сгенерируй реестр:
+```bash
+python publish.py   # генерирует plugins/registry.json
+```
+
+> `marketplace_server.yaml` содержит секреты — он в `.gitignore` и не коммитится.
+
+### Подключение в TL IDE
+
+1. ⚙ Настройки → Маркетплейсы → заполни форму:
+   - **Название**: My Private Plugins
+   - **URL**: `http://your-server:9090/registry.json`
+   - **API Key**: `my-secret-key-abc123`
+2. Нажми **+**
+3. Перейди в 🏪 Marketplace — приватные плагины появятся в списке
+
+API-ключ хранится в `config.yaml` (пользовательский файл, вне репо) и передаётся заголовком `X-API-Key` при каждом запросе к реестру и при скачивании файлов плагинов.
+
+### Запуск через systemd (на сервере)
+
+```bash
+# /etc/systemd/system/tl-ide-marketplace.service
+[Unit]
+Description=TL IDE Private Marketplace
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/tl-ide-plugins/marketplace_server.py
+WorkingDirectory=/opt/tl-ide-plugins
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
 ```
 
 ---

@@ -645,10 +645,16 @@ def plugin_panel():
                     type="warning", timeout=8000,
                 )
                 return
+            # API key: берём из конфига маркетплейса по имени
+            mp_cfg = next((m for m in MARKETPLACES if m["name"] == mp_name), {})
+            install_headers = _mp_headers(mp_cfg)
+
             dest = PLUGINS_DIR / plugin_id / "plugin.py"
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                code = await asyncio.to_thread(lambda: requests.get(raw_url, timeout=10).text)
+                code = await asyncio.to_thread(
+                    lambda: requests.get(raw_url, timeout=10, headers=install_headers).text
+                )
                 dest.write_text(code, encoding="utf-8")
                 m = load_manifest()
                 m[plugin_id] = {
@@ -675,11 +681,19 @@ def plugin_panel():
 
         all_entries: list = []
 
+        def _mp_headers(mp: dict) -> dict:
+            """Возвращает заголовки для запроса к маркетплейсу (X-API-Key если задан)."""
+            key = mp.get("api_key", "").strip()
+            return {"X-API-Key": key} if key else {}
+
         async def load_registry():
             nonlocal all_entries
             results = await asyncio.gather(
                 *[
-                    asyncio.to_thread(lambda url=m["url"], name=m["name"]: (name, requests.get(url, timeout=10)))
+                    asyncio.to_thread(
+                        lambda url=m["url"], name=m["name"], hdrs=_mp_headers(m):
+                            (name, requests.get(url, timeout=10, headers=hdrs))
+                    )
                     for m in MARKETPLACES
                 ],
                 return_exceptions=True,
@@ -789,9 +803,18 @@ def plugin_panel():
                         with ui.row().classes("items-center gap-2 w-full"):
                             row_inputs["name"] = ui.input(value=mp["name"], label="Название").classes("w-36")
                             row_inputs["url"] = ui.input(value=mp["url"], label="URL registry.json").classes("flex-1")
+                            row_inputs["api_key"] = ui.input(
+                                value=mp.get("api_key", ""),
+                                label="API Key",
+                                password=True,
+                                password_toggle_button=True,
+                            ).classes("w-40").tooltip("Оставь пустым для публичного реестра")
                             def do_save_row(i=idx, ri=row_inputs):
                                 updated = list(MARKETPLACES)
-                                updated[i] = {"name": ri["name"].value.strip(), "url": ri["url"].value.strip()}
+                                entry = {"name": ri["name"].value.strip(), "url": ri["url"].value.strip()}
+                                if key := ri["api_key"].value.strip():
+                                    entry["api_key"] = key
+                                updated[i] = entry
                                 if updated[i]["name"] and updated[i]["url"]:
                                     save_marketplaces(updated)
                                     ui.notify("Сохранено", type="positive")
@@ -808,15 +831,24 @@ def plugin_panel():
             with ui.row().classes("items-center gap-2 w-full"):
                 new_name = ui.input(label="Название").classes("w-36")
                 new_url = ui.input(label="URL registry.json").classes("flex-1")
+                new_key = ui.input(
+                    label="API Key",
+                    password=True,
+                    password_toggle_button=True,
+                ).classes("w-40").tooltip("Оставь пустым для публичного реестра")
                 def do_add_mp():
                     name_val = new_name.value.strip()
                     url_val = new_url.value.strip()
                     if not name_val or not url_val:
                         ui.notify("Заполни название и URL", type="warning")
                         return
-                    save_marketplaces(list(MARKETPLACES) + [{"name": name_val, "url": url_val}])
+                    entry: dict = {"name": name_val, "url": url_val}
+                    if key := new_key.value.strip():
+                        entry["api_key"] = key
+                    save_marketplaces(list(MARKETPLACES) + [entry])
                     new_name.set_value("")
                     new_url.set_value("")
+                    new_key.set_value("")
                     render_mp_rows()
                     ui.notify(f"Добавлен маркетплейс «{name_val}»", type="positive")
                 ui.button(icon="add", on_click=do_add_mp).props("flat round dense color=primary").tooltip("Добавить")
