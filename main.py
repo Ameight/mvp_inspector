@@ -1198,6 +1198,15 @@ with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
                     state["plugin"] = LOGS_SENTINEL
                     plugin_panel.refresh()
                 ui.button(icon="bug_report", on_click=open_logs).props("flat round dense").classes("text-gray-400").tooltip("Логи")
+                def confirm_shutdown():
+                    with ui.dialog() as dlg, ui.card():
+                        ui.label("Завершить приложение?").classes("text-lg font-bold mb-2")
+                        ui.label("TL IDE будет остановлен.").classes("text-gray-400 text-sm mb-4")
+                        with ui.row().classes("gap-2 justify-end w-full"):
+                            ui.button("Отмена", on_click=dlg.close).props("flat")
+                            ui.button("Завершить", on_click=nicegui_app.shutdown).props("unelevated color=negative")
+                    dlg.open()
+                ui.button(icon="power_settings_new", on_click=confirm_shutdown).props("flat round dense").classes("text-red-400").tooltip("Завершить приложение")
 
         sidebar_panel()
 
