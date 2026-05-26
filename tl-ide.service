@@ -1,0 +1,14 @@
+[Unit]
+Description=TL IDE — плагинируемая утилита для team lead задач
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=VENV_PYTHON MAIN_PY
+WorkingDirectory=APP_DIR
+Restart=always
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

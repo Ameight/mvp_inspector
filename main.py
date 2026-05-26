@@ -15,16 +15,29 @@ from sdk.base_plugin import PluginInterface, app_log, _logs
 import asyncio
 from collections import defaultdict
 
+def _is_systemd() -> bool:
+    """systemd выставляет INVOCATION_ID для каждого запущенного юнита."""
+    return bool(os.environ.get("INVOCATION_ID"))
+
+
 def _restart_app() -> None:
-    """Корректный перезапуск без 'address already in use'.
+    """Корректный перезапуск в зависимости от режима запуска.
 
-    on_shutdown срабатывает до закрытия сокета (это внутри lifespan uvicorn'а),
-    поэтому os.execv в on_shutdown всё равно заходит на занятый порт.
+    systemd (Restart=always, RestartSec=2):
+        Просто останавливаем сервер — systemd поднимет процесс сам
+        после того как порт освободится. Никакого гонки за порт.
 
-    Решение: запускаем независимый процесс-наблюдатель (start_new_session=True),
-    который опрашивает порт и стартует приложение только когда порт освободится.
-    Затем текущий процесс штатно останавливается через shutdown().
+    Без systemd (dev / прямой запуск):
+        on_shutdown срабатывает до закрытия сокета uvicorn'а, поэтому
+        нельзя сразу делать execv. Запускаем независимый процесс-наблюдатель
+        (start_new_session=True), который опрашивает порт и стартует
+        приложение только когда порт освободится.
     """
+    if _is_systemd():
+        # systemd сам перезапустит — просто штатно останавливаемся
+        nicegui_app.shutdown()
+        return
+
     executable = sys.executable
     argv = sys.argv[:]
     port = 8080
