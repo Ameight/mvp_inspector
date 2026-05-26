@@ -66,6 +66,7 @@ jobs:
         run: pip install -r requirements.txt pyinstaller
 
       - name: Build with PyInstaller
+        shell: bash
         run: |
           pyinstaller main.py \
             --name tl-ide \
