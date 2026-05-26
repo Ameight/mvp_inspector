@@ -2,47 +2,94 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ["v*"]
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  # ── 1. Source ZIP + создание релиза ──────────────────────────────────────────
+  source-zip:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build source ZIP
+        run: |
+          TAG=${{ github.ref_name }}
+          DIR="tl-ide-${TAG}"
+          mkdir "$DIR"
+
+          # Только нужные файлы — без .venv, .git, секретов
+          cp main.py create_plugin.py marketplace_server.py \
+             requirements.txt config.example.yaml \
+             tl-ide.service Makefile run.sh run.bat README.md \
+             "$DIR/"
+          cp -r sdk "$DIR/sdk"
+          chmod +x "$DIR/run.sh"
+
+          zip -r "tl-ide-${TAG}-source.zip" "$DIR/"
+
+      - name: Create GitHub Release and upload source ZIP
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            "tl-ide-${{ github.ref_name }}-source.zip"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 2. Сборка исполняемых файлов ─────────────────────────────────────────────
+  build-exe:
+    needs: source-zip
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux
+          - os: windows-latest
+            label: Windows
+          - os: macos-latest
+            label: macOS
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set VERSION from tag
-        run: echo "${{ github.ref_name }}" | sed 's/^v//' > VERSION
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-      - name: Build ZIP
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
         run: |
-          TAG=${{ github.ref_name }}
-          DIST=dist/TL_IDE
+          pyinstaller main.py \
+            --name tl-ide \
+            --onedir \
+            --collect-all nicegui \
+            --noconfirm
 
-          mkdir -p "$DIST"
-
-          cp main.py create_plugin.py requirements.txt VERSION Makefile run.sh run.bat README.md "$DIST/"
-          cp config.yaml "$DIST/config.yaml.example"
-          cp -r plugins "$DIST/plugins"
-
-          # убираем лишнее
-          find "$DIST" -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-          rm -f "$DIST/plugins/manifest.json"
-
-          chmod +x "$DIST/run.sh"
-
+      - name: Archive (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
           cd dist
-          zip -r "TL_IDE_${TAG}.zip" TL_IDE/
+          zip -r "../tl-ide-${{ github.ref_name }}-${{ matrix.label }}.zip" tl-ide/
 
-      - name: Create GitHub Release
+      - name: Archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/tl-ide `
+            -DestinationPath "tl-ide-${{ github.ref_name }}-${{ matrix.label }}.zip"
+
+      - name: Upload to Release
+        shell: bash
+        run: |
+          gh release upload ${{ github.ref_name }} \
+            "tl-ide-${{ github.ref_name }}-${{ matrix.label }}.zip"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create ${{ github.ref_name }} \
-            "dist/TL_IDE_${{ github.ref_name }}.zip" \
-            --title "${{ github.ref_name }}" \
-            --generate-notes
