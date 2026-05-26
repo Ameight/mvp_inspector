@@ -11,7 +11,7 @@ endif
 SERVICE_NAME = tl-ide
 USER_SYSTEMD_DIR = $(HOME)/.config/systemd/user
 
-.PHONY: help install update run plugin \
+.PHONY: help install update run stop plugin \
         install-service uninstall-service \
         service-start service-stop service-status service-logs
 
@@ -22,6 +22,7 @@ help:
 	@echo "  make install              Создать venv и установить зависимости"
 	@echo "  make update               Обновить код и зависимости (dev-режим, ветка master)"
 	@echo "  make run                  Запустить приложение напрямую"
+	@echo "  make stop                 Остановить приложение (по PID-файлу или порту 8080)"
 	@echo "  make plugin name=<name>   Создать плагин [category=<cat>]"
 	@echo ""
 	@echo "  systemd (Linux):"
@@ -44,6 +45,24 @@ update:
 
 run:
 	$(VENV_PYTHON) main.py
+
+stop:
+	@if [ -f tl-ide.pid ]; then \
+		PID=$$(cat tl-ide.pid); \
+		if kill "$$PID" 2>/dev/null; then \
+			echo "✅ Остановлено (PID $$PID)"; \
+		else \
+			echo "⚠️  PID $$PID не найден, чистим файл"; \
+			rm -f tl-ide.pid; \
+		fi; \
+	else \
+		PID=$$(lsof -ti :8080 2>/dev/null | head -1); \
+		if [ -n "$$PID" ]; then \
+			kill "$$PID" && echo "✅ Остановлено (PID $$PID, найден по порту 8080)"; \
+		else \
+			echo "❌ Приложение не запущено"; \
+		fi; \
+	fi
 
 plugin:
 	@if [ -z "$(name)" ]; then echo "❌ Укажи имя: make plugin name=my_plugin [category=devops]"; exit 1; fi

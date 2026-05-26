@@ -3,6 +3,7 @@
 .env
 config.yaml
 marketplace_server.yaml
+tl-ide.pid
 VERSION
 __pycache__/
 .DS_Store

@@ -1219,6 +1219,17 @@ async def _startup_update_check():
             type="info", timeout=0, close_button="✕",
         )
 
+_PID_FILE = _APP_DIR / "tl-ide.pid"
+
+def _write_pid() -> None:
+    _PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+
+def _remove_pid() -> None:
+    _PID_FILE.unlink(missing_ok=True)
+
+nicegui_app.on_startup(_write_pid)
+nicegui_app.on_shutdown(_remove_pid)
+
 ui.timer(0.05, show_setup_wizard, once=True)
 ui.timer(2.0, _startup_update_check, once=True)
 
