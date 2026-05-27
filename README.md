@@ -20,6 +20,7 @@
 - [Запуск через systemd](#запуск-через-systemd)
 - [Приватный маркетплейс с API-ключом](#приватный-маркетплейс-с-api-ключом)
 - [Создание своего маркетплейса](#создание-своего-маркетплейса)
+- [Тесты](#тесты)
 
 ---
 
@@ -516,6 +517,25 @@ https://raw.githubusercontent.com/your-org/my-plugins/master/registry.json
 - [ ] Все внешние зависимости перечислены в `requires`
 - [ ] Секреты объявлены в `get_required_env()` с понятным `label`
 - [ ] Плагин обрабатывает отсутствие токена и возвращает понятное сообщение
+
+---
+
+## Тесты
+
+В проекте есть 58 автоматических тестов для основных компонентов.
+
+```bash
+pip install -r requirements-dev.txt
+make test
+```
+
+```
+tests/test_utils.py          — parse_version, sha256, check_integrity
+tests/test_sdk.py            — PluginInterface SDK
+tests/test_marketplace.py    — HTTP API приватного маркетплейса
+```
+
+Подробнее: [DEVELOPMENT.md → Тесты](DEVELOPMENT.md#тесты)
 
 ---
 
