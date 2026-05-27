@@ -23,10 +23,11 @@ jobs:
           # Только нужные файлы — без .venv, .git, секретов
           cp main.py create_plugin.py marketplace_server.py \
              requirements.txt config.example.yaml \
-             tl-ide.service Makefile run.sh run.bat README.md \
+             tl-ide.service Makefile run.sh run.bat \
+             README.md DEVELOPMENT.md install.sh \
              "$DIR/"
           cp -r sdk "$DIR/sdk"
-          chmod +x "$DIR/run.sh"
+          chmod +x "$DIR/run.sh" "$DIR/install.sh"
 
           zip -r "tl-ide-${TAG}-source.zip" "$DIR/"
 
