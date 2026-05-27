@@ -42,17 +42,6 @@ source ~/.bashrc
 
 ---
 
-### macOS — через Homebrew
-
-```bash
-brew tap Ameight/tl-ide
-brew install tl-ide
-```
-
-> Homebrew-формула обновляется при каждом релизе. Обновить: `brew upgrade tl-ide`
-
----
-
 ### Windows
 
 1. Открой страницу [последнего релиза](https://github.com/Ameight/mvp_inspector/releases/latest)
