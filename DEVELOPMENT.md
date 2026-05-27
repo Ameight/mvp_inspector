@@ -134,6 +134,42 @@ make run
 
 ---
 
+## Тесты
+
+### Запуск
+
+```bash
+# Установить зависимости для разработки (один раз)
+pip install -r requirements-dev.txt
+
+# Запустить все тесты
+make test
+# или
+pytest
+```
+
+### Структура
+
+```
+tests/
+  test_utils.py         # parse_version, compute_sha256, check_integrity, is_systemd
+  test_sdk.py           # PluginInterface: get_config_key, configure, run, log, дефолты
+  test_marketplace.py   # marketplace_server.py: авторизация, раздача файлов, _load_config
+```
+
+### Что тестируется
+
+| Модуль | Покрытие |
+|---|---|
+| `utils.py` | Все функции, edge cases |
+| `sdk/base_plugin.py` | Все методы PluginInterface |
+| `marketplace_server.py` | Auth (401/200), раздача файлов, защита от path traversal, _load_config |
+
+> `main.py` не тестируется напрямую — UI-код требует NiceGUI-окружения.  
+> Чистые утилиты из него вынесены в `utils.py` и покрыты тестами.
+
+---
+
 ## Добавление зависимости
 
 ```bash

@@ -1,6 +1,5 @@
 from nicegui import ui, app as nicegui_app
 import importlib.util
-import hashlib
 import json
 import os
 import shutil
@@ -12,12 +11,13 @@ import requests
 from pathlib import Path
 from dotenv import load_dotenv
 from sdk.base_plugin import PluginInterface, app_log, _logs
+from utils import parse_version, compute_sha256, check_integrity, is_systemd
 import asyncio
 from collections import defaultdict
 
 def _is_systemd() -> bool:
     """systemd выставляет INVOCATION_ID для каждого запущенного юнита."""
-    return bool(os.environ.get("INVOCATION_ID"))
+    return is_systemd()
 
 
 def _restart_app() -> None:
@@ -132,10 +132,6 @@ def save_manifest(manifest: dict) -> None:
     )
 
 
-def compute_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def get_local_version() -> str:
     try:
         r = subprocess.run(
@@ -151,13 +147,6 @@ def get_local_version() -> str:
     if version_file.exists():
         return version_file.read_text(encoding="utf-8").strip()
     return "0.0.0"
-
-
-def parse_version(v: str) -> tuple[int, ...]:
-    try:
-        return tuple(int(x) for x in v.lstrip("v").split("."))
-    except Exception:
-        return (0, 0, 0)
 
 
 def get_dirty_tracked_files() -> list[str]:
@@ -235,17 +224,9 @@ async def do_update(tag: str) -> None:
 
 
 def check_integrity(plugin_id: str, manifest: dict) -> bool:
-    """SHA256 проверка для marketplace-плагинов. Custom всегда OK."""
-    entry = manifest.get(plugin_id, {})
-    if entry.get("source") != "marketplace":
-        return True
-    stored = entry.get("sha256")
-    if not stored:
-        return True
-    plugin_file = PLUGINS_DIR / plugin_id / "plugin.py"
-    if not plugin_file.exists():
-        return False
-    return compute_sha256(plugin_file) == stored
+    """Обёртка: вызывает utils.check_integrity с глобальным PLUGINS_DIR."""
+    from utils import check_integrity as _check_integrity
+    return _check_integrity(plugin_id, manifest, PLUGINS_DIR)
 
 
 # === Загрузка плагинов
