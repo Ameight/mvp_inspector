@@ -287,6 +287,38 @@ def save_marketplaces(new_list: list) -> None:
     )
 
 
+def _presets_path() -> Path:
+    return CONFIG_PATH.parent / "plugin_presets.json"
+
+def _load_all_presets() -> dict:
+    p = _presets_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def _save_all_presets(data: dict) -> None:
+    _presets_path().write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+def get_plugin_presets(plugin_key: str) -> dict:
+    return _load_all_presets().get(plugin_key, {})
+
+def save_plugin_preset(plugin_key: str, name: str, values: dict) -> None:
+    data = _load_all_presets()
+    data.setdefault(plugin_key, {})[name] = values
+    _save_all_presets(data)
+
+def delete_plugin_preset(plugin_key: str, name: str) -> None:
+    data = _load_all_presets()
+    if plugin_key in data and name in data[plugin_key]:
+        del data[plugin_key][name]
+        if not data[plugin_key]:
+            del data[plugin_key]
+        _save_all_presets(data)
+
+
 def save_env_vars(updates: dict) -> None:
     """Записывает переменные в .env и сразу применяет в os.environ."""
     env_path = Path(".env")
@@ -1037,6 +1069,57 @@ def plugin_panel():
                 inputs[key] = ui.textarea(label=label, value=default).classes("w-full").props("rows=5")
             else:
                 inputs[key] = ui.input(label=label, value=default).classes("w-full")
+
+    # === Пресеты
+    plugin_key = p.get_config_key()
+    _presets: dict = get_plugin_presets(plugin_key)
+
+    with ui.row().classes("items-center gap-2 mt-3 w-full"):
+        preset_select = ui.select(
+            list(_presets.keys()),
+            value=None,
+            label="Пресет",
+            with_input=True,
+        ).classes("flex-1").props("dense outlined clearable")
+
+        def _load_preset(ps=preset_select, pr=_presets, inp=inputs):
+            name = ps.value
+            if not name or name not in pr:
+                ui.notify("Выбери или введи имя пресета", type="warning")
+                return
+            for key, widget in inp.items():
+                if key in pr[name]:
+                    widget.set_value(pr[name][key])
+            ui.notify(f"Загружен «{name}»", type="positive")
+
+        def _save_preset(ps=preset_select, pr=_presets, inp=inputs, pk=plugin_key):
+            name = (ps.value or "").strip()
+            if not name:
+                ui.notify("Введи имя пресета", type="warning")
+                return
+            vals = {k: v.value for k, v in inp.items()}
+            save_plugin_preset(pk, name, vals)
+            pr[name] = vals
+            ps.options = list(pr.keys())
+            ps.update()
+            ps.set_value(name)
+            ui.notify(f"Сохранено «{name}»", type="positive")
+
+        def _delete_preset(ps=preset_select, pr=_presets, pk=plugin_key):
+            name = ps.value
+            if not name or name not in pr:
+                ui.notify("Выбери существующий пресет", type="warning")
+                return
+            delete_plugin_preset(pk, name)
+            del pr[name]
+            ps.options = list(pr.keys())
+            ps.update()
+            ps.set_value(None)
+            ui.notify(f"Удалён «{name}»", type="info")
+
+        ui.button(icon="folder_open", on_click=_load_preset).props("flat round dense color=primary").tooltip("Загрузить пресет")
+        ui.button(icon="save", on_click=_save_preset).props("flat round dense color=primary").tooltip("Сохранить пресет")
+        ui.button(icon="delete", on_click=_delete_preset).props("flat round dense color=red-4").tooltip("Удалить пресет")
 
     output_area = ui.markdown("*Ожидание запуска…*").classes("w-full text-left text-sm mt-4").style(
         "min-height: 180px; max-height: 600px; overflow-y: auto;"
