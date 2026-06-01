@@ -1111,6 +1111,9 @@ def plugin_panel():
             ui.icon("warning", color="red")
             ui.label("Файл плагина был изменён после установки из marketplace.").classes("text-red-300 text-sm")
 
+    schema = p.get_config_schema()
+    inputs: dict = {}
+
     # Env vars check
     required_env = p.get_required_env()
     if required_env:
@@ -1128,9 +1131,6 @@ def plugin_panel():
                 save_plugin_preset(pk, "__last__", {k: v.value for k, v in inp.items()})
                 _env_dialog(plugin, req, on_saved=plugin_panel.refresh)
             ui.button(lbl, on_click=_open_env_dialog).props("flat dense size=sm")
-
-    schema = p.get_config_schema()
-    inputs: dict = {}
 
     def _render_field(key: str, field: dict) -> None:
         label = field.get("label", key)
