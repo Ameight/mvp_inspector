@@ -387,13 +387,70 @@ def delete_plugin(plugin: PluginInterface) -> None:
         if not plugins_by_category[category]:
             del plugins_by_category[category]
 
-    state["plugin"] = loaded_plugins[0] if loaded_plugins else None
-    sidebar_panel.refresh()
-    plugin_panel.refresh()
+    _close_tab(plugin)
+    if not state["plugin"] and loaded_plugins:
+        _open_tab(loaded_plugins[0])
 
 
 # === Состояние
-state: dict = {"plugin": loaded_plugins[0] if loaded_plugins else None}
+state: dict = {
+    "plugin": loaded_plugins[0] if loaded_plugins else None,
+    "tabs": list(loaded_plugins[:1]),   # открытые вкладки (PluginInterface)
+    "last_outputs": {},                 # plugin_key -> последний текст вывода
+}
+
+
+def _open_tab(plugin: PluginInterface) -> None:
+    if plugin not in state["tabs"]:
+        state["tabs"].append(plugin)
+    state["plugin"] = plugin
+    tabs_bar.refresh()
+    plugin_panel.refresh()
+    sidebar_panel.refresh()
+
+
+def _close_tab(plugin: PluginInterface) -> None:
+    if plugin not in state["tabs"]:
+        return
+    idx = state["tabs"].index(plugin)
+    state["tabs"].remove(plugin)
+    if state["plugin"] is plugin:
+        if state["tabs"]:
+            state["plugin"] = state["tabs"][max(idx - 1, 0)]
+        else:
+            state["plugin"] = None
+    tabs_bar.refresh()
+    plugin_panel.refresh()
+    sidebar_panel.refresh()
+
+
+@ui.refreshable
+def tabs_bar():
+    if not state["tabs"]:
+        return
+    with ui.row().classes("w-full items-end gap-0 px-4").style(
+        "border-bottom: 1px solid #2a2a2a; flex-wrap: nowrap; overflow-x: auto; min-height: 40px;"
+    ):
+        for p in list(state["tabs"]):
+            is_active = state["plugin"] is p
+            border_col = "#3b82f6" if is_active else "transparent"
+            bg = "#252525" if is_active else "transparent"
+            txt = "text-white" if is_active else "text-gray-500"
+            with ui.row().classes(f"items-center gap-1 px-3 py-1 shrink-0").style(
+                f"border-bottom: 2px solid {border_col}; background: {bg};"
+                "border-radius: 4px 4px 0 0; cursor: pointer;"
+            ):
+                def _switch(pl=p):
+                    state["plugin"] = pl
+                    tabs_bar.refresh()
+                    plugin_panel.refresh()
+                    sidebar_panel.refresh()
+                ui.label(p.get_display_name()).classes(f"text-sm {txt}").on("click", _switch)
+                def _close(pl=p):
+                    _close_tab(pl)
+                ui.button(icon="close", on_click=_close).props(
+                    "flat round dense size=xs"
+                ).classes("text-gray-600 ml-1")
 
 
 PLUGIN_TEMPLATE = '''\
@@ -471,8 +528,7 @@ def sidebar_panel():
             for p in plugins_by_category[category]:
                 def make_handler(plugin=p):
                     def handler():
-                        state["plugin"] = plugin
-                        plugin_panel.refresh()
+                        _open_tab(plugin)
                     return handler
 
                 is_active = state["plugin"] is p
@@ -1070,13 +1126,18 @@ def plugin_panel():
             else:
                 inputs[key] = ui.input(label=label, value=default).classes("w-full")
 
-    # === Пресеты
+    # === Пресеты + автовосстановление последних значений полей
     plugin_key = p.get_config_key()
     _presets: dict = get_plugin_presets(plugin_key)
+    _last_inputs = _presets.get("__last__", {})
+    for key, widget in inputs.items():
+        if key in _last_inputs:
+            widget.set_value(_last_inputs[key])
 
     with ui.row().classes("items-center gap-2 mt-3 w-full"):
+        _visible_presets = [k for k in _presets if k != "__last__"]
         preset_select = ui.select(
-            list(_presets.keys()),
+            _visible_presets,
             value=None,
             label="Пресет",
             with_input=True,
@@ -1100,7 +1161,7 @@ def plugin_panel():
             vals = {k: v.value for k, v in inp.items()}
             save_plugin_preset(pk, name, vals)
             pr[name] = vals
-            ps.options = list(pr.keys())
+            ps.options = [k for k in pr if k != "__last__"]
             ps.update()
             ps.set_value(name)
             ui.notify(f"Сохранено «{name}»", type="positive")
@@ -1112,7 +1173,7 @@ def plugin_panel():
                 return
             delete_plugin_preset(pk, name)
             del pr[name]
-            ps.options = list(pr.keys())
+            ps.options = [k for k in pr if k != "__last__"]
             ps.update()
             ps.set_value(None)
             ui.notify(f"Удалён «{name}»", type="info")
@@ -1121,11 +1182,12 @@ def plugin_panel():
         ui.button(icon="save", on_click=_save_preset).props("flat round dense color=primary").tooltip("Сохранить пресет")
         ui.button(icon="delete", on_click=_delete_preset).props("flat round dense color=red-4").tooltip("Удалить пресет")
 
-    output_area = ui.markdown("*Ожидание запуска…*").classes("w-full text-left text-sm mt-4").style(
+    _saved_output = state["last_outputs"].get(plugin_key, "")
+    output_area = ui.markdown(_saved_output or "*Ожидание запуска…*").classes("w-full text-left text-sm mt-4").style(
         "min-height: 180px; max-height: 600px; overflow-y: auto;"
         "border: 1px solid #333; padding: 16px; border-radius: 8px;"
     )
-    result_store: dict = {"text": ""}
+    result_store: dict = {"text": _saved_output}
 
     with ui.row().classes("gap-2 mt-2"):
         run_button = ui.button("▶ Запустить", color="primary")
@@ -1133,6 +1195,7 @@ def plugin_panel():
 
     async def run_plugin():
         data = {k: v.value for k, v in inputs.items()}
+        save_plugin_preset(plugin_key, "__last__", data)
         output_area.content = "⏳ **Выполнение...**"
         run_button.set_enabled(False)
         run_button.set_text("Выполнение...")
@@ -1143,6 +1206,7 @@ def plugin_panel():
                 result = await result
             text = result if isinstance(result, str) else str(result)
             result_store["text"] = text
+            state["last_outputs"][plugin_key] = text
             output_area.content = text
         except Exception as e:
             app_log(str(e), level="error", source=p.get_display_name())
@@ -1275,8 +1339,10 @@ with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
         sidebar_panel()
 
     # Основная область
-    with ui.column().classes("flex-1 p-8 overflow-auto"):
-        plugin_panel()
+    with ui.column().classes("flex-1 overflow-auto").style("min-height: 100vh;"):
+        tabs_bar()
+        with ui.column().classes("flex-1 p-8"):
+            plugin_panel()
 
 async def _startup_update_check():
     rel = await fetch_latest_release()
