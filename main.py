@@ -1113,6 +1113,7 @@ def plugin_panel():
 
     schema = p.get_config_schema()
     inputs: dict = {}
+    plugin_key = p.get_config_key()
 
     # Env vars check
     required_env = p.get_required_env()
@@ -1165,7 +1166,6 @@ def plugin_panel():
             _render_field(key, field)
 
     # === Пресеты + автовосстановление последних значений полей
-    plugin_key = p.get_config_key()
     _presets: dict = get_plugin_presets(plugin_key)
     _last_inputs = _presets.get("__last__", {})
     for key, widget in inputs.items():
