@@ -12,6 +12,7 @@ import pathlib
 import secrets
 import string
 import sys
+from urllib.parse import urlparse
 
 ROOT = pathlib.Path(".")
 
@@ -84,32 +85,97 @@ def _write(path: pathlib.Path, content: str) -> None:
     print(f"    ✍️  {path}")
 
 
+_GIT_PLATFORMS = {
+    "github":  "GitHub",
+    "gitlab":  "GitLab",
+    "gitea":   "Gitea / Forgejo",
+    "bitbucket": "Bitbucket",
+    "custom":  "Другое (ввести вручную)",
+}
+
+
+def _detect_platform(host: str) -> str | None:
+    host = host.lower()
+    if host == "github.com":
+        return "github"
+    if host == "gitlab.com" or "gitlab" in host:
+        return "gitlab"
+    if host == "bitbucket.org":
+        return "bitbucket"
+    # Gitea/Forgejo не детектируются по hostname — слишком много вариантов
+    return None
+
+
+def _build_git_urls(repo_url: str, branch: str) -> tuple[str, str]:
+    """Returns (base_url for plugins dir, registry_url)."""
+    url = repo_url.rstrip("/").removesuffix(".git")
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    scheme = parsed.scheme or "https"
+    path = parsed.path.strip("/")
+
+    platform = _detect_platform(host)
+    if platform:
+        label = _GIT_PLATFORMS[platform]
+        print(f"\n  Определена платформа: {label}")
+    else:
+        print(f"\n  Платформа не распознана для хоста «{host}».")
+        platform = _prompt_choice(
+            "  Выбери тип",
+            ["gitlab", "gitea", "bitbucket", "custom"],
+            "gitlab",
+        )
+
+    if platform == "github":
+        base = f"https://raw.githubusercontent.com/{path}/{branch}/plugins"
+        reg  = f"https://raw.githubusercontent.com/{path}/{branch}/registry.json"
+
+    elif platform == "gitlab":
+        base = f"{scheme}://{host}/{path}/-/raw/{branch}/plugins"
+        reg  = f"{scheme}://{host}/{path}/-/raw/{branch}/registry.json"
+
+    elif platform == "gitea":
+        base = f"{scheme}://{host}/{path}/raw/branch/{branch}/plugins"
+        reg  = f"{scheme}://{host}/{path}/raw/branch/{branch}/registry.json"
+
+    elif platform == "bitbucket":
+        base = f"https://bitbucket.org/{path}/raw/{branch}/plugins"
+        reg  = f"https://bitbucket.org/{path}/raw/{branch}/registry.json"
+
+    else:  # custom
+        print("  Введи URL-ы вручную (raw-доступ к файлам в репозитории):")
+        base = _prompt("base_url (папка plugins)", f"https://{host}/{path}/raw/{branch}/plugins")
+        reg  = _prompt("registry_url",             f"https://{host}/{path}/raw/{branch}/registry.json")
+
+    return base, reg
+
+
 def main() -> None:
     print("╔══════════════════════════════════════════════╗")
     print("║   TL IDE Marketplace — Init                  ║")
     print("╚══════════════════════════════════════════════╝")
     print()
 
-    hosting = _prompt_choice("Тип хостинга", ["github", "server"], "github")
+    hosting = _prompt_choice("Тип хостинга", ["git", "server"], "git")
     print()
 
-    if hosting == "github":
-        github_url = _prompt(
-            "URL репозитория на GitHub",
+    if hosting == "git":
+        repo_url = _prompt(
+            "URL репозитория",
             "https://github.com/your-org/your-plugins",
         )
         branch = _prompt("Ветка", "master")
-        gh_parts = github_url.rstrip("/").split("github.com/")
-        owner_repo = gh_parts[-1] if len(gh_parts) > 1 else "your-org/your-plugins"
-        base_url = f"https://raw.githubusercontent.com/{owner_repo}/{branch}/plugins"
-        registry_url = f"https://raw.githubusercontent.com/{owner_repo}/{branch}/registry.json"
+
+        base_url, registry_url = _build_git_urls(repo_url, branch)
+
         publish_yaml = (
             f"base_url: {base_url}\n"
             "plugins_dir: ./plugins\n"
             "output: ./registry.json\n"
         )
         server_mode = False
-    else:
+
+    else:  # server
         srv_host = _prompt("Публичный хост или IP", "0.0.0.0")
         srv_port = _prompt("Порт", "9090")
         base_url = f"http://{srv_host}:{srv_port}"
@@ -155,9 +221,9 @@ def main() -> None:
         print()
 
     print("Следующие шаги:\n")
-    if hosting == "github":
+    if not server_mode:
         print("  1. python publish.py    # сгенерировать registry.json")
-        print("  2. git add . && git commit -m 'init' && git push")
+        print("  2. Закоммить и запушить registry.json в репозиторий")
         print()
         print("  Подключить в TL IDE → Настройки → Маркетплейсы:")
         print(f"    URL: {registry_url}")

@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from sdk.base_plugin import PluginInterface, app_log, _logs
 from utils import parse_version, compute_sha256, check_integrity, is_systemd
 import asyncio
+import time
 from collections import defaultdict
 
 def _is_systemd() -> bool:
@@ -270,6 +271,13 @@ NEW_PLUGIN_SENTINEL = "__new_plugin__"
 MARKETPLACE_SENTINEL = "__marketplace__"
 SETTINGS_SENTINEL = "__settings__"
 LOGS_SENTINEL = "__logs__"
+
+_SENTINEL_LABELS: dict[str, tuple[str, str]] = {
+    NEW_PLUGIN_SENTINEL:  ("add",         "Добавить плагин"),
+    MARKETPLACE_SENTINEL: ("storefront",  "Marketplace"),
+    SETTINGS_SENTINEL:    ("settings",    "Настройки"),
+    LOGS_SENTINEL:        ("bug_report",  "Логи"),
+}
 MARKETPLACES: list[dict] = config.get("marketplaces", [
     {"name": "Official", "url": "https://raw.githubusercontent.com/Ameight/tl-ide-plugins/master/registry.json"}
 ])
@@ -436,7 +444,11 @@ def tabs_bar():
             border_col = "#3b82f6" if is_active else "transparent"
             bg = "#252525" if is_active else "transparent"
             txt = "text-white" if is_active else "text-gray-500"
-            with ui.row().classes(f"items-center gap-1 px-3 py-1 shrink-0").style(
+            if isinstance(p, PluginInterface):
+                tab_icon, tab_label = "code", p.get_display_name()
+            else:
+                tab_icon, tab_label = _SENTINEL_LABELS.get(p, ("", str(p)))
+            with ui.row().classes("items-center gap-1 px-3 py-1 shrink-0").style(
                 f"border-bottom: 2px solid {border_col}; background: {bg};"
                 "border-radius: 4px 4px 0 0; cursor: pointer;"
             ):
@@ -445,7 +457,9 @@ def tabs_bar():
                     tabs_bar.refresh()
                     plugin_panel.refresh()
                     sidebar_panel.refresh()
-                ui.label(p.get_display_name()).classes(f"text-sm {txt}").on("click", _switch)
+                with ui.row().classes(f"items-center gap-1 {txt}").on("click", _switch):
+                    ui.icon(tab_icon, size="xs")
+                    ui.label(tab_label).classes("text-sm")
                 def _close(pl=p):
                     _close_tab(pl)
                 ui.button(icon="close", on_click=_close).props(
@@ -470,24 +484,31 @@ class MyPlugin(PluginInterface):
 
     def get_config_schema(self) -> dict:
         return {
-            "input": {
-                "label": "Входные данные",
+            # config: True — задаётся один раз, хранится между запусками
+            "base_url": {
+                "label": "URL сервиса",
+                "type": "string",
+                "default": "https://example.com",
+                "config": True,
+            },
+            # без config — меняется каждый запуск
+            "query": {
+                "label": "Запрос",
                 "type": "string",   # string | textarea | int | bool | select_or_input
                 "default": "",
             },
         }
 
     def run(self, inputs: dict) -> str:
-        value = inputs.get("input", "")
+        base_url = inputs.get("base_url", "")
+        query    = inputs.get("query", "")
 
-        # TODO: реализовать логику плагина
         # Secrets: os.getenv("MY_TOKEN")
-        # Config:  self.config.get("base_url")
-        return f"**Результат:**\\n\\n{value}"
+        return f"**Результат:**\\n\\n{base_url}: {query}"
 '''
 
 
-def _env_dialog(plugin: PluginInterface, req: dict) -> None:
+def _env_dialog(plugin: PluginInterface, req: dict, on_saved=None) -> None:
     """Открывает модальное окно для настройки env-переменных плагина."""
     field_inputs: dict = {}
     with ui.dialog() as dlg, ui.card().classes("min-w-96"):
@@ -511,7 +532,7 @@ def _env_dialog(plugin: PluginInterface, req: dict) -> None:
                     save_env_vars(upd)
                     ui.notify(f"Сохранено: {len(upd)} переменных", type="positive")
                 d.close()
-                plugin_panel.refresh()
+                (on_saved or plugin_panel.refresh)()
             ui.button("Сохранить", on_click=do_save).props("unelevated color=primary")
     dlg.open()
 
@@ -1103,28 +1124,45 @@ def plugin_panel():
                 ui.icon("check_circle", color="green")
                 ui.label("Все переменные окружения настроены").classes("text-green-400 text-sm flex-1")
             lbl = "Настроить" if missing_env else "Изменить"
-            ui.button(lbl, on_click=lambda plugin=p, req=required_env: _env_dialog(plugin, req)).props("flat dense size=sm")
+            def _open_env_dialog(plugin=p, req=required_env, inp=inputs, pk=plugin_key):
+                save_plugin_preset(pk, "__last__", {k: v.value for k, v in inp.items()})
+                _env_dialog(plugin, req, on_saved=plugin_panel.refresh)
+            ui.button(lbl, on_click=_open_env_dialog).props("flat dense size=sm")
 
     schema = p.get_config_schema()
     inputs: dict = {}
 
-    with ui.column().classes("w-full gap-3"):
-        for key, field in schema.items():
-            label = field.get("label", key)
-            default = field.get("default", "")
-            input_type = field.get("type", "string")
+    def _render_field(key: str, field: dict) -> None:
+        label = field.get("label", key)
+        default = field.get("default", "")
+        input_type = field.get("type", "string")
+        if input_type == "int":
+            inputs[key] = ui.number(label=label, value=default).classes("w-full")
+        elif input_type == "bool":
+            inputs[key] = ui.checkbox(text=label, value=default)
+        elif input_type == "select_or_input":
+            options = field.get("options", [])
+            inputs[key] = ui.select(options, value=default, label=label, with_input=True).classes("w-full")
+        elif input_type == "textarea":
+            inputs[key] = ui.textarea(label=label, value=default).classes("w-full").props("rows=5")
+        else:
+            inputs[key] = ui.input(label=label, value=default).classes("w-full")
 
-            if input_type == "int":
-                inputs[key] = ui.number(label=label, value=default).classes("w-full")
-            elif input_type == "bool":
-                inputs[key] = ui.checkbox(text=label, value=default)
-            elif input_type == "select_or_input":
-                options = field.get("options", [])
-                inputs[key] = ui.select(options, value=default, label=label, with_input=True).classes("w-full")
-            elif input_type == "textarea":
-                inputs[key] = ui.textarea(label=label, value=default).classes("w-full").props("rows=5")
-            else:
-                inputs[key] = ui.input(label=label, value=default).classes("w-full")
+    config_fields = {k: v for k, v in schema.items() if v.get("config")}
+    input_fields  = {k: v for k, v in schema.items() if not v.get("config")}
+
+    if config_fields:
+        with ui.expansion("Настройки плагина", icon="tune", value=True).classes("w-full mb-1").props(
+            "dense header-class='text-gray-400 text-sm'"
+        ):
+            ui.label("Сохраняются между запусками. Задай один раз.").classes("text-gray-600 text-xs mb-2")
+            with ui.column().classes("w-full gap-3"):
+                for key, field in config_fields.items():
+                    _render_field(key, field)
+
+    with ui.column().classes("w-full gap-3"):
+        for key, field in input_fields.items():
+            _render_field(key, field)
 
     # === Пресеты + автовосстановление последних значений полей
     plugin_key = p.get_config_key()
@@ -1136,24 +1174,8 @@ def plugin_panel():
 
     with ui.row().classes("items-center gap-2 mt-3 w-full"):
         _visible_presets = [k for k in _presets if k != "__last__"]
-        preset_select = ui.select(
-            _visible_presets,
-            value=None,
-            label="Пресет",
-            with_input=True,
-        ).classes("flex-1").props("dense outlined clearable")
 
-        def _load_preset(ps=preset_select, pr=_presets, inp=inputs):
-            name = ps.value
-            if not name or name not in pr:
-                ui.notify("Выбери или введи имя пресета", type="warning")
-                return
-            for key, widget in inp.items():
-                if key in pr[name]:
-                    widget.set_value(pr[name][key])
-            ui.notify(f"Загружен «{name}»", type="positive")
-
-        def _save_preset(ps=preset_select, pr=_presets, inp=inputs, pk=plugin_key):
+        def _save_preset(ps, pr=_presets, inp=inputs, pk=plugin_key):
             name = (ps.value or "").strip()
             if not name:
                 ui.notify("Введи имя пресета", type="warning")
@@ -1166,10 +1188,10 @@ def plugin_panel():
             ps.set_value(name)
             ui.notify(f"Сохранено «{name}»", type="positive")
 
-        def _delete_preset(ps=preset_select, pr=_presets, pk=plugin_key):
+        def _delete_preset(ps, pr=_presets, pk=plugin_key):
             name = ps.value
             if not name or name not in pr:
-                ui.notify("Выбери существующий пресет", type="warning")
+                ui.notify("Выбери существующий пресет для удаления", type="warning")
                 return
             delete_plugin_preset(pk, name)
             del pr[name]
@@ -1178,9 +1200,24 @@ def plugin_panel():
             ps.set_value(None)
             ui.notify(f"Удалён «{name}»", type="info")
 
-        ui.button(icon="folder_open", on_click=_load_preset).props("flat round dense color=primary").tooltip("Загрузить пресет")
-        ui.button(icon="save", on_click=_save_preset).props("flat round dense color=primary").tooltip("Сохранить пресет")
-        ui.button(icon="delete", on_click=_delete_preset).props("flat round dense color=red-4").tooltip("Удалить пресет")
+        def _on_preset_change(val, pr=_presets, inp=inputs):
+            if val and val in pr:
+                for key, widget in inp.items():
+                    if key in pr[val]:
+                        widget.set_value(pr[val][key])
+                ui.notify(f"Загружен «{val}»", type="positive")
+
+        preset_select = ui.select(
+            _visible_presets,
+            value=None,
+            label="Пресеты",
+            with_input=True,
+            on_change=lambda e: _on_preset_change(e.value),
+        ).classes("flex-1").props('dense outlined clearable')
+        preset_select.props('placeholder="Выбери пресет или введи имя"')
+
+        ui.button("Сохранить", icon="save", on_click=lambda ps=preset_select: _save_preset(ps)).props("flat dense color=primary size=sm")
+        ui.button("Удалить", icon="delete", on_click=lambda ps=preset_select: _delete_preset(ps)).props("flat dense color=red-4 size=sm")
 
     _saved_output = state["last_outputs"].get(plugin_key, "")
     output_area = ui.markdown(_saved_output or "*Ожидание запуска…*").classes("w-full text-left text-sm mt-4").style(
@@ -1196,14 +1233,25 @@ def plugin_panel():
     async def run_plugin():
         data = {k: v.value for k, v in inputs.items()}
         save_plugin_preset(plugin_key, "__last__", data)
-        output_area.content = "⏳ **Выполнение...**"
         run_button.set_enabled(False)
         run_button.set_text("Выполнение...")
+
+        _start = time.monotonic()
+        _active = {"v": True}
+
+        def _tick():
+            if _active["v"]:
+                elapsed = int(time.monotonic() - _start)
+                output_area.content = f"⏳ **Выполнение... {elapsed} с**"
+
+        output_area.content = "⏳ **Выполнение... 0 с**"
+        _ticker = ui.timer(1.0, _tick)
         await asyncio.sleep(0.05)
         try:
-            result = p.run(data)
-            if inspect.isawaitable(result):
-                result = await result
+            if inspect.iscoroutinefunction(p.run):
+                result = await p.run(data)
+            else:
+                result = await asyncio.to_thread(p.run, data)
             text = result if isinstance(result, str) else str(result)
             result_store["text"] = text
             state["last_outputs"][plugin_key] = text
@@ -1212,6 +1260,8 @@ def plugin_panel():
             app_log(str(e), level="error", source=p.get_display_name())
             output_area.content = f"❌ **Ошибка:**\n```\n{e}\n```"
         finally:
+            _active["v"] = False
+            _ticker.cancel()
             run_button.set_text("▶ Запустить")
             run_button.set_enabled(True)
 
@@ -1310,29 +1360,27 @@ with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
         with ui.row().classes("items-center justify-between px-4 py-4"):
             ui.label("TL IDE").classes("text-lg font-bold")
             with ui.row().classes("gap-1"):
-                def open_marketplace():
-                    state["plugin"] = MARKETPLACE_SENTINEL
-                    plugin_panel.refresh()
-                ui.button(icon="storefront", on_click=open_marketplace).props("flat round dense").tooltip("Marketplace")
-                def open_new_plugin():
-                    state["plugin"] = NEW_PLUGIN_SENTINEL
-                    plugin_panel.refresh()
-                ui.button(icon="add", on_click=open_new_plugin).props("flat round dense").classes("text-gray-400").tooltip("Добавить плагин")
-                def open_settings():
-                    state["plugin"] = SETTINGS_SENTINEL
-                    plugin_panel.refresh()
-                ui.button(icon="settings", on_click=open_settings).props("flat round dense").classes("text-gray-400").tooltip("Настройки")
-                def open_logs():
-                    state["plugin"] = LOGS_SENTINEL
-                    plugin_panel.refresh()
-                ui.button(icon="bug_report", on_click=open_logs).props("flat round dense").classes("text-gray-400").tooltip("Логи")
+                ui.button(icon="storefront", on_click=lambda: _open_tab(MARKETPLACE_SENTINEL)).props("flat round dense").tooltip("Marketplace")
+                ui.button(icon="add", on_click=lambda: _open_tab(NEW_PLUGIN_SENTINEL)).props("flat round dense").classes("text-gray-400").tooltip("Добавить плагин")
+                ui.button(icon="settings", on_click=lambda: _open_tab(SETTINGS_SENTINEL)).props("flat round dense").classes("text-gray-400").tooltip("Настройки")
+                ui.button(icon="bug_report", on_click=lambda: _open_tab(LOGS_SENTINEL)).props("flat round dense").classes("text-gray-400").tooltip("Логи")
                 def confirm_shutdown():
                     with ui.dialog() as dlg, ui.card():
                         ui.label("Завершить приложение?").classes("text-lg font-bold mb-2")
                         ui.label("TL IDE будет остановлен.").classes("text-gray-400 text-sm mb-4")
                         with ui.row().classes("gap-2 justify-end w-full"):
                             ui.button("Отмена", on_click=dlg.close).props("flat")
-                            ui.button("Завершить", on_click=nicegui_app.shutdown).props("unelevated color=negative")
+                            async def do_shutdown(d=dlg):
+                                d.close()
+                                await ui.run_javascript(
+                                    "document.body.innerHTML = '<div style=\"display:flex;align-items:center;"
+                                    "justify-content:center;height:100vh;background:#111;color:#999;"
+                                    "font-family:sans-serif;font-size:1.1rem\">"
+                                    "TL IDE завершён. Вкладку можно закрыть.</div>';"
+                                )
+                                await asyncio.sleep(0.4)
+                                nicegui_app.shutdown()
+                            ui.button("Завершить", on_click=do_shutdown).props("unelevated color=negative")
                     dlg.open()
                 ui.button(icon="power_settings_new", on_click=confirm_shutdown).props("flat round dense").classes("text-red-400").tooltip("Завершить приложение")
 
