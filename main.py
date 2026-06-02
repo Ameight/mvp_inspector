@@ -1414,10 +1414,53 @@ def _write_pid() -> None:
 def _remove_pid() -> None:
     _PID_FILE.unlink(missing_ok=True)
 
+def _setup_systray() -> None:
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return
+
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([0, 0, size - 1, size - 1], radius=14, fill=(59, 130, 246))
+    # "T" letter
+    draw.rectangle([10, 10, 34, 18], fill="white")
+    draw.rectangle([18, 18, 26, 52], fill="white")
+    # "L" letter
+    draw.rectangle([34, 10, 42, 52], fill="white")
+    draw.rectangle([34, 44, 56, 52], fill="white")
+
+    import webbrowser
+
+    def _on_open(icon, item):
+        webbrowser.open("http://localhost:8080")
+
+    def _on_quit(icon, item):
+        icon.stop()
+        nicegui_app.shutdown()
+
+    menu = pystray.Menu(
+        pystray.MenuItem("Открыть TL IDE", _on_open, default=True),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Завершить", _on_quit),
+    )
+    _icon = pystray.Icon("TL IDE", img, "TL IDE", menu)
+
+    try:
+        _icon.run_detached()
+    except Exception:
+        return
+
+    nicegui_app.on_shutdown(lambda: _icon.stop())
+
+
 nicegui_app.on_startup(_write_pid)
 nicegui_app.on_shutdown(_remove_pid)
 
 ui.timer(0.05, show_setup_wizard, once=True)
+ui.timer(0.5, _setup_systray, once=True)
 ui.timer(2.0, _startup_update_check, once=True)
 
 ui.run(title="TL IDE", favicon="🛠️")

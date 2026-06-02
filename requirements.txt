@@ -2,3 +2,5 @@ nicegui
 pyyaml
 python-dotenv
 requests
+pystray
+Pillow
