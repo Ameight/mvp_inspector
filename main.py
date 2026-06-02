@@ -793,18 +793,23 @@ def plugin_panel():
             for item in results:
                 if isinstance(item, Exception):
                     errors.append(str(item))
+                    app_log(str(item), level="error", source="marketplace")
                     continue
                 mp_name, resp = item
                 try:
                     if resp.status_code == 404:
-                        errors.append(f"{mp_name}: registry.json не найден")
+                        msg = f"{mp_name}: registry.json не найден"
+                        errors.append(msg)
+                        app_log(msg, level="error", source="marketplace")
                         continue
                     resp.raise_for_status()
                     for entry in resp.json():
                         entry["_marketplace"] = mp_name
                         all_entries.append(entry)
                 except Exception as e:
-                    errors.append(f"{mp_name}: {e}")
+                    msg = f"{mp_name}: {e}"
+                    errors.append(msg)
+                    app_log(msg, level="error", source="marketplace")
 
             if errors and not all_entries:
                 status_label.set_text("❌ " + "; ".join(errors))
@@ -1379,6 +1384,8 @@ with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
                                     "TL IDE завершён. Вкладку можно закрыть.</div>';"
                                 )
                                 await asyncio.sleep(0.4)
+                                import threading
+                                threading.Thread(target=lambda: (__import__("time").sleep(2), os._exit(0)), daemon=True).start()
                                 nicegui_app.shutdown()
                             ui.button("Завершить", on_click=do_shutdown).props("unelevated color=negative")
                     dlg.open()
@@ -1414,7 +1421,15 @@ def _write_pid() -> None:
 def _remove_pid() -> None:
     _PID_FILE.unlink(missing_ok=True)
 
+_systray_started = False
+
+
 def _setup_systray() -> None:
+    global _systray_started
+    if _systray_started:
+        return
+    _systray_started = True
+
     try:
         import pystray
         from PIL import Image, ImageDraw
@@ -1425,19 +1440,19 @@ def _setup_systray() -> None:
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([0, 0, size - 1, size - 1], radius=14, fill=(59, 130, 246))
-    # "T" letter
     draw.rectangle([10, 10, 34, 18], fill="white")
     draw.rectangle([18, 18, 26, 52], fill="white")
-    # "L" letter
     draw.rectangle([34, 10, 42, 52], fill="white")
     draw.rectangle([34, 44, 56, 52], fill="white")
 
     import webbrowser
+    import threading
 
     def _on_open(icon, item):
         webbrowser.open("http://localhost:8080")
 
     def _on_quit(icon, item):
+        threading.Thread(target=lambda: (__import__("time").sleep(2), os._exit(0)), daemon=True).start()
         icon.stop()
         nicegui_app.shutdown()
 
@@ -1450,17 +1465,19 @@ def _setup_systray() -> None:
 
     try:
         _icon.run_detached()
-    except Exception:
+        app_log("Systray запущен", source="systray")
+    except Exception as e:
+        app_log(f"Ошибка запуска systray: {e}", level="error", source="systray")
         return
 
     nicegui_app.on_shutdown(lambda: _icon.stop())
 
 
 nicegui_app.on_startup(_write_pid)
+nicegui_app.on_startup(_setup_systray)
 nicegui_app.on_shutdown(_remove_pid)
 
 ui.timer(0.05, show_setup_wizard, once=True)
-ui.timer(0.5, _setup_systray, once=True)
 ui.timer(2.0, _startup_update_check, once=True)
 
 ui.run(title="TL IDE", favicon="🛠️")
