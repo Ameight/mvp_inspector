@@ -772,9 +772,21 @@ def plugin_panel():
         all_entries: list = []
 
         def _mp_headers(mp: dict) -> dict:
-            """Возвращает заголовки для запроса к маркетплейсу (X-API-Key если задан)."""
+            """Возвращает заголовки аутентификации для маркетплейса.
+
+            GitLab (gitlab.com / self-hosted) — PRIVATE-TOKEN
+            GitHub  (github.com)              — Authorization: token …
+            Иначе                             — X-API-Key (кастомный сервер)
+            """
             key = mp.get("api_key", "").strip()
-            return {"X-API-Key": key} if key else {}
+            if not key:
+                return {}
+            url = mp.get("url", "")
+            if "gitlab" in url:
+                return {"PRIVATE-TOKEN": key}
+            if "github" in url:
+                return {"Authorization": f"token {key}"}
+            return {"X-API-Key": key}
 
         async def load_registry():
             nonlocal all_entries
@@ -802,13 +814,38 @@ def plugin_panel():
                         errors.append(msg)
                         app_log(msg, level="error", source="marketplace")
                         continue
+                    if resp.status_code in (401, 403):
+                        msg = f"{mp_name}: нет доступа (HTTP {resp.status_code}) — проверь API Key и его права"
+                        errors.append(msg)
+                        app_log(msg, level="error", source="marketplace")
+                        continue
+                    # Редирект на страницу входа: requests следует по 302,
+                    # финальный URL отличается от исходного
+                    original_url = next(
+                        (m["url"] for m in MARKETPLACES if m["name"] == mp_name), ""
+                    )
+                    if resp.url != original_url and (
+                        "sign_in" in resp.url or "login" in resp.url or "auth" in resp.url
+                    ):
+                        msg = f"{mp_name}: редирект на страницу входа — API Key отсутствует или неверный (итоговый URL: {resp.url})"
+                        errors.append(msg)
+                        app_log(msg, level="error", source="marketplace")
+                        continue
                     resp.raise_for_status()
                     for entry in resp.json():
                         entry["_marketplace"] = mp_name
                         all_entries.append(entry)
                 except Exception as e:
-                    msg = f"{mp_name}: {e}"
-                    errors.append(msg)
+                    body_preview = resp.text[:300].strip() if hasattr(resp, "text") else ""
+                    detail = (
+                        f"HTTP {resp.status_code} {resp.url}"
+                        if hasattr(resp, "status_code")
+                        else str(e)
+                    )
+                    if body_preview:
+                        detail += f" | body: {body_preview}"
+                    msg = f"{mp_name}: {e} [{detail}]"
+                    errors.append(f"{mp_name}: {e}")
                     app_log(msg, level="error", source="marketplace")
 
             if errors and not all_entries:
@@ -882,8 +919,32 @@ def plugin_panel():
             ui.label("Ни один загруженный плагин не требует env-переменных.").classes("text-gray-500 text-sm mb-4")
 
         ui.separator().classes("my-4")
-        ui.label("Маркетплейсы").classes("text-lg font-semibold mb-3")
-        ui.label("Изменения применяются сразу и сохраняются в config.yaml.").classes("text-gray-400 text-sm mb-3")
+        ui.label("Маркетплейсы").classes("text-lg font-semibold mb-1")
+        ui.label("Изменения применяются сразу и сохраняются в config.yaml.").classes("text-gray-400 text-sm mb-2")
+
+        with ui.expansion("Как получить API Key?", icon="help_outline").classes("w-full mb-3").props(
+            "dense header-class='text-gray-400 text-sm'"
+        ):
+            ui.markdown("""
+**GitHub (приватный репозиторий)**
+- Settings → Developer settings → Personal access tokens → **Tokens (classic)**
+- Права: `repo` (полный доступ к приватным репо)
+- URL формат: `https://raw.githubusercontent.com/<user>/<repo>/<branch>/registry.json`
+
+**GitLab (приватный репозиторий)**
+- Profile → Access Tokens → New token
+- Права: `read_repository`
+- URL формат: `https://gitlab.com/<group>/<project>/-/raw/<branch>/registry.json`
+
+**Кастомный сервер** (`marketplace_server.py`)
+- API Key задаётся в `marketplace_server.yaml` при инициализации
+- URL формат: `http://your-server:8765/registry.json`
+
+**Публичный реестр** — API Key не нужен, оставь поле пустым.
+
+> Ключ автоматически подставляется в нужный заголовок:
+> GitLab → `PRIVATE-TOKEN`, GitHub → `Authorization: token`, остальное → `X-API-Key`
+""").classes("text-sm")
 
         mp_rows: list[dict] = []
         mp_list_col = ui.column().classes("w-full gap-2 mb-3")
@@ -1430,6 +1491,24 @@ def _setup_systray() -> None:
         return
     _systray_started = True
 
+    import sys
+    if sys.platform == "darwin":
+        # macOS: AppKit требует главного потока, а он занят uvicorn/uvloop.
+        # Запускаем трей в отдельном subprocess — у него свой главный поток.
+        try:
+            import subprocess
+            script = Path(__file__).parent / "_systray_subprocess.py"
+            proc = subprocess.Popen(
+                [sys.executable, str(script), str(os.getpid()), "8080"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            app_log("Systray запущен", source="systray")
+            nicegui_app.on_shutdown(lambda: proc.terminate())
+        except Exception as e:
+            app_log(f"Ошибка запуска systray: {e}", level="error", source="systray")
+        return
+
     try:
         import pystray
         from PIL import Image, ImageDraw
@@ -1471,6 +1550,18 @@ def _setup_systray() -> None:
         return
 
     nicegui_app.on_shutdown(lambda: _icon.stop())
+
+
+@nicegui_app.get("/_tl_ide/shutdown")
+async def _api_shutdown():
+    """Вызывается из systray-subprocess для завершения приложения."""
+    import threading
+    threading.Thread(
+        target=lambda: (__import__("time").sleep(2), os._exit(0)),
+        daemon=True,
+    ).start()
+    nicegui_app.shutdown()
+    return {"ok": True}
 
 
 nicegui_app.on_startup(_write_pid)
