@@ -11,7 +11,7 @@ endif
 SERVICE_NAME = tl-ide
 USER_SYSTEMD_DIR = $(HOME)/.config/systemd/user
 
-.PHONY: help install update run stop test plugin \
+.PHONY: help install install-dev update run stop test plugin \
         install-service uninstall-service \
         service-start service-stop service-status service-logs
 
@@ -20,10 +20,11 @@ help:
 	@echo ""
 	@echo "  Разработка:"
 	@echo "  make install              Создать venv и установить зависимости"
+	@echo "  make install-dev          + dev-зависимости (для тестов)"
 	@echo "  make update               Обновить код и зависимости (dev-режим, ветка master)"
 	@echo "  make run                  Запустить приложение напрямую"
 	@echo "  make stop                 Остановить приложение (по PID-файлу или порту 8080)"
-	@echo "  make test                 Запустить тесты"
+	@echo "  make test                 Запустить тесты (сам подтянет dev-зависимости)"
 	@echo "  make plugin name=<name>   Создать плагин [category=<cat>]"
 	@echo ""
 	@echo "  systemd (Linux):"
@@ -39,6 +40,9 @@ help:
 install:
 	python -m venv .venv
 	$(VENV_PIP) install -r requirements.txt
+
+install-dev: install
+	$(VENV_PIP) install -r requirements-dev.txt
 
 update:
 	git pull origin master
@@ -66,6 +70,7 @@ stop:
 	fi
 
 test:
+	$(VENV_PIP) install -q -r requirements-dev.txt
 	$(VENV_PYTHON) -m pytest
 
 plugin:
