@@ -1,5 +1,0 @@
-version: "1.0.0"
-author: ""
-requires: []
-# min_app_version: "0.3.0"
-# requires: список pip-пакетов, нужных плагину. Пример: [requests, pyyaml]

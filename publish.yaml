@@ -1,3 +1,0 @@
-base_url: https://gitlab.com/myorg/my-plugins/-/raw/master/plugins
-plugins_dir: ./plugins
-output: ./registry.json
