@@ -12,6 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from sdk.base_plugin import PluginInterface, app_log, _logs
 from utils import parse_version, compute_sha256, check_integrity, is_systemd
+from updater import get_local_version, get_dirty_tracked_files, fetch_latest_release, perform_update
 import asyncio
 import time
 from collections import defaultdict
@@ -133,51 +134,6 @@ def save_manifest(manifest: dict) -> None:
     )
 
 
-def get_local_version() -> str:
-    try:
-        r = subprocess.run(
-            ["git", "describe", "--tags", "--abbrev=0"],
-            capture_output=True, text=True, check=True,
-        )
-        return r.stdout.strip()
-    except Exception:
-        pass
-    # Fallback for zip-release installs (no git / no .git dir).
-    # The VERSION file is written by the release workflow.
-    version_file = Path(__file__).parent / "VERSION"
-    if version_file.exists():
-        return version_file.read_text(encoding="utf-8").strip()
-    return "0.0.0"
-
-
-def get_dirty_tracked_files() -> list[str]:
-    try:
-        r = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
-        # Пропускаем неотслеживаемые файлы (??) — они не мешают checkout
-        return [line[3:].strip() for line in r.stdout.splitlines()
-                if line.strip() and not line.startswith("??")]
-    except Exception:
-        return []
-
-
-async def fetch_latest_release() -> dict | None:
-    try:
-        resp = await asyncio.to_thread(
-            lambda: requests.get(
-                f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
-                timeout=8,
-                headers={"Accept": "application/vnd.github+json"},
-            )
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        app_log(f"GitHub API вернул {resp.status_code}: {resp.text[:300]}", level="error", source="updater")
-        return None
-    except Exception as e:
-        app_log(f"Ошибка соединения с GitHub: {e}", level="error", source="updater")
-        return None
-
-
 async def do_update(tag: str) -> None:
     dirty = get_dirty_tracked_files()
     if dirty:
@@ -185,43 +141,17 @@ async def do_update(tag: str) -> None:
         app_log(msg, level="warning", source="updater")
         ui.notify(msg, type="warning", timeout=8000)
         return
-    # Сохраняем и удаляем config.yaml до checkout:
-    # - backup нужен чтобы не потерять настройки
-    # - удаление нужно чтобы git не падал с "untracked file would be overwritten"
-    #   (актуально при откате на тег, где config.yaml ещё был отслежен)
-    config_backup = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else None
-    if CONFIG_PATH.exists():
-        CONFIG_PATH.unlink()
+    app_log(f"Начинаем обновление до {tag}", source="updater")
     spinner = ui.notification("Обновление...", spinner=True, timeout=None)
-    try:
-        app_log(f"Начинаем обновление до {tag}", source="updater")
-        await asyncio.to_thread(lambda: subprocess.run(
-            ["git", "fetch", "--tags"], check=True, capture_output=True
-        ))
-        app_log("git fetch --tags — OK", source="updater")
-        await asyncio.to_thread(lambda: subprocess.run(
-            ["git", "checkout", tag], check=True, capture_output=True
-        ))
-        app_log(f"git checkout {tag} — OK", source="updater")
-        if config_backup is not None:
-            CONFIG_PATH.write_text(config_backup, encoding="utf-8")
-            app_log("config.yaml восстановлен", source="updater")
-        await asyncio.to_thread(lambda: subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
-            check=True, capture_output=True,
-        ))
-        app_log("pip install — OK", source="updater")
-        spinner.dismiss()
+    success, error = await perform_update(tag, Path("."), CONFIG_PATH)
+    spinner.dismiss()
+    if success:
+        app_log(f"Обновление до {tag} — OK", source="updater")
         update_state["update_done"] = tag
         plugin_panel.refresh()
-    except subprocess.CalledProcessError as e:
-        spinner.dismiss()
-        if config_backup is not None:
-            CONFIG_PATH.write_text(config_backup, encoding="utf-8")
-        err = (e.stderr or b"").decode(errors="replace")
-        full_err = err or str(e)
-        app_log(f"Ошибка обновления: {full_err}", level="error", source="updater")
-        ui.notify(f"❌ Ошибка обновления: {full_err[:200]}", type="negative", timeout=10000)
+    else:
+        app_log(f"Ошибка обновления: {error}", level="error", source="updater")
+        ui.notify(f"❌ Ошибка обновления: {error[:200]}", type="negative", timeout=10000)
 
 
 def check_integrity(plugin_id: str, manifest: dict) -> bool:
@@ -1125,7 +1055,7 @@ def plugin_panel():
         async def _check_updates():
             update_state["error"] = None
             plugin_panel.refresh()
-            rel = await fetch_latest_release()
+            rel = await fetch_latest_release(GITHUB_REPO)
             if rel is None:
                 update_state["error"] = "Не удалось получить данные с GitHub"
             else:
@@ -1461,7 +1391,7 @@ with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
             plugin_panel()
 
 async def _startup_update_check():
-    rel = await fetch_latest_release()
+    rel = await fetch_latest_release(GITHUB_REPO)
     if rel is None:
         return
     update_state["latest_release"] = rel
