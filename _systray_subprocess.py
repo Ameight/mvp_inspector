@@ -26,12 +26,12 @@ def _monitor_parent(parent_pid: int) -> None:
             os._exit(0)
 
 
-def main() -> None:
-    if len(sys.argv) < 3:
-        sys.exit(1)
-
-    parent_pid = int(sys.argv[1])
-    port = int(sys.argv[2])
+def main(parent_pid: int | None = None, port: int | None = None) -> None:
+    if parent_pid is None or port is None:
+        if len(sys.argv) < 3:
+            sys.exit(1)
+        parent_pid = int(sys.argv[1])
+        port = int(sys.argv[2])
 
     try:
         import pystray

@@ -1,4 +1,30 @@
+import sys as _sys
+
+# В frozen-сборке (PyInstaller) sys.executable — это сам бинарник tl-ide,
+# а не интерпретатор python: он не умеет запускать произвольный .py-файл
+# как отдельный скрипт, а просто перезапускает этот же main.py целиком.
+# Поэтому systray-хелпер на macOS запускается через тот же бинарник с этим
+# флагом-маркером — проверяем это первым делом, до тяжёлых импортов nicegui,
+# и уходим в отдельную, независимую от остального приложения ветку.
+if len(_sys.argv) >= 4 and _sys.argv[1] == "--systray-subprocess":
+    from _systray_subprocess import main as _systray_main
+    _systray_main(int(_sys.argv[2]), int(_sys.argv[3]))
+    _sys.exit(0)
+
 from nicegui import ui, app as nicegui_app
+
+if getattr(_sys, "frozen", False):
+    # NiceGUI на каждом старте молча создаёт ProcessPoolExecutor для (в этом
+    # приложении неиспользуемого) run.cpu_bound(). На macOS multiprocessing по
+    # умолчанию поднимает воркеров через start_method "spawn", а это значит
+    # запуск sys.executable с флагом -c — но в frozen-сборке sys.executable
+    # это сам бинарник tl-ide, а не интерпретатор, способный принять -c.
+    # Итог: бинарник просто перезапускает целиком сам себя, рекурсивно.
+    # "fork" клонирует уже запущенный процесс через os.fork() и не нуждается
+    # в отдельном интерпретаторе — эту проблему полностью обходит.
+    import nicegui.run as _nicegui_run
+    _nicegui_run.process_pool_start_method = "fork"
+
 import importlib.util
 import json
 import os
@@ -1383,50 +1409,55 @@ def show_setup_wizard():
 
 
 # === Layout
-ui.dark_mode().enable()
+@ui.page('/')
+def index() -> None:
+    ui.dark_mode().enable()
 
-with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
+    with ui.row().classes("w-full gap-0").style("min-height: 100vh"):
 
-    # Сайдбар
-    with ui.column().classes("gap-0 p-0").style(
-        "width: 220px; min-height: 100vh; background: #1a1a1a; border-right: 1px solid #2a2a2a; flex-shrink: 0;"
-    ):
-        with ui.row().classes("items-center justify-between px-4 py-4"):
-            ui.label("TL IDE").classes("text-lg font-bold")
-            with ui.row().classes("gap-1"):
-                ui.button(icon="storefront", on_click=lambda: _open_tab(MARKETPLACE_SENTINEL)).props("flat round dense").tooltip("Marketplace")
-                ui.button(icon="add", on_click=lambda: _open_tab(NEW_PLUGIN_SENTINEL)).props("flat round dense").classes("text-gray-400").tooltip("Добавить плагин")
-                ui.button(icon="settings", on_click=lambda: _open_tab(SETTINGS_SENTINEL)).props("flat round dense").classes("text-gray-400").tooltip("Настройки")
-                ui.button(icon="bug_report", on_click=lambda: _open_tab(LOGS_SENTINEL)).props("flat round dense").classes("text-gray-400").tooltip("Логи")
-                def confirm_shutdown():
-                    with ui.dialog() as dlg, ui.card():
-                        ui.label("Завершить приложение?").classes("text-lg font-bold mb-2")
-                        ui.label("TL IDE будет остановлен.").classes("text-gray-400 text-sm mb-4")
-                        with ui.row().classes("gap-2 justify-end w-full"):
-                            ui.button("Отмена", on_click=dlg.close).props("flat")
-                            async def do_shutdown(d=dlg):
-                                d.close()
-                                await ui.run_javascript(
-                                    "document.body.innerHTML = '<div style=\"display:flex;align-items:center;"
-                                    "justify-content:center;height:100vh;background:#111;color:#999;"
-                                    "font-family:sans-serif;font-size:1.1rem\">"
-                                    "TL IDE завершён. Вкладку можно закрыть.</div>';"
-                                )
-                                await asyncio.sleep(0.4)
-                                import threading
-                                threading.Thread(target=lambda: (__import__("time").sleep(2), os._exit(0)), daemon=True).start()
-                                nicegui_app.shutdown()
-                            ui.button("Завершить", on_click=do_shutdown).props("unelevated color=negative")
-                    dlg.open()
-                ui.button(icon="power_settings_new", on_click=confirm_shutdown).props("flat round dense").classes("text-red-400").tooltip("Завершить приложение")
+        # Сайдбар
+        with ui.column().classes("gap-0 p-0").style(
+            "width: 220px; min-height: 100vh; background: #1a1a1a; border-right: 1px solid #2a2a2a; flex-shrink: 0;"
+        ):
+            with ui.row().classes("items-center justify-between px-4 py-4"):
+                ui.label("TL IDE").classes("text-lg font-bold")
+                with ui.row().classes("gap-1"):
+                    ui.button(icon="storefront", on_click=lambda: _open_tab(MARKETPLACE_SENTINEL)).props("flat round dense").tooltip("Marketplace")
+                    ui.button(icon="add", on_click=lambda: _open_tab(NEW_PLUGIN_SENTINEL)).props("flat round dense").classes("text-gray-400").tooltip("Добавить плагин")
+                    ui.button(icon="settings", on_click=lambda: _open_tab(SETTINGS_SENTINEL)).props("flat round dense").classes("text-gray-400").tooltip("Настройки")
+                    ui.button(icon="bug_report", on_click=lambda: _open_tab(LOGS_SENTINEL)).props("flat round dense").classes("text-gray-400").tooltip("Логи")
+                    def confirm_shutdown():
+                        with ui.dialog() as dlg, ui.card():
+                            ui.label("Завершить приложение?").classes("text-lg font-bold mb-2")
+                            ui.label("TL IDE будет остановлен.").classes("text-gray-400 text-sm mb-4")
+                            with ui.row().classes("gap-2 justify-end w-full"):
+                                ui.button("Отмена", on_click=dlg.close).props("flat")
+                                async def do_shutdown(d=dlg):
+                                    d.close()
+                                    await ui.run_javascript(
+                                        "document.body.innerHTML = '<div style=\"display:flex;align-items:center;"
+                                        "justify-content:center;height:100vh;background:#111;color:#999;"
+                                        "font-family:sans-serif;font-size:1.1rem\">"
+                                        "TL IDE завершён. Вкладку можно закрыть.</div>';"
+                                    )
+                                    await asyncio.sleep(0.4)
+                                    import threading
+                                    threading.Thread(target=lambda: (__import__("time").sleep(2), os._exit(0)), daemon=True).start()
+                                    nicegui_app.shutdown()
+                                ui.button("Завершить", on_click=do_shutdown).props("unelevated color=negative")
+                        dlg.open()
+                    ui.button(icon="power_settings_new", on_click=confirm_shutdown).props("flat round dense").classes("text-red-400").tooltip("Завершить приложение")
 
-        sidebar_panel()
+            sidebar_panel()
 
-    # Основная область
-    with ui.column().classes("flex-1 overflow-auto").style("min-height: 100vh;"):
-        tabs_bar()
-        with ui.column().classes("flex-1 p-8"):
-            plugin_panel()
+        # Основная область
+        with ui.column().classes("flex-1 overflow-auto").style("min-height: 100vh;"):
+            tabs_bar()
+            with ui.column().classes("flex-1 p-8"):
+                plugin_panel()
+
+    ui.timer(0.05, show_setup_wizard, once=True)
+    ui.timer(2.0, _startup_update_check, once=True)
 
 async def _startup_update_check():
     rel = await fetch_latest_release(GITHUB_REPO)
@@ -1465,9 +1496,16 @@ def _setup_systray() -> None:
         # Запускаем трей в отдельном subprocess — у него свой главный поток.
         try:
             import subprocess
-            script = Path(__file__).parent / "_systray_subprocess.py"
+            if getattr(sys, "frozen", False):
+                # Frozen-бинарник не умеет запускать произвольный .py как отдельный
+                # скрипт — sys.executable это он сам. Перезапускаем себя с флагом-
+                # маркером, который main.py перехватывает в самом начале файла.
+                cmd = [sys.executable, "--systray-subprocess", str(os.getpid()), str(PORT)]
+            else:
+                script = Path(__file__).parent / "_systray_subprocess.py"
+                cmd = [sys.executable, str(script), str(os.getpid()), str(PORT)]
             proc = subprocess.Popen(
-                [sys.executable, str(script), str(os.getpid()), str(PORT)],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -1536,7 +1574,4 @@ nicegui_app.on_startup(_write_pid)
 nicegui_app.on_startup(_setup_systray)
 nicegui_app.on_shutdown(_remove_pid)
 
-ui.timer(0.05, show_setup_wizard, once=True)
-ui.timer(2.0, _startup_update_check, once=True)
-
-ui.run(title="TL IDE", favicon="🛠️", port=PORT)
+ui.run(title="TL IDE", favicon="🛠️", port=PORT, reload=not getattr(sys, "frozen", False))
