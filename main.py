@@ -17,6 +17,44 @@ import asyncio
 import time
 from collections import defaultdict
 
+# === Порт
+# Приоритет: --port <N> из аргументов запуска > переменная окружения TL_IDE_PORT > 8080.
+# Если выбранный порт занят — ищем ближайший свободный и предупреждаем в логах,
+# вместо падения с "Address already in use".
+def _requested_port() -> int:
+    for i, arg in enumerate(sys.argv[1:], start=1):
+        if arg == "--port" and i + 1 < len(sys.argv):
+            return int(sys.argv[i + 1])
+        if arg.startswith("--port="):
+            return int(arg.split("=", 1)[1])
+    return int(os.environ.get("TL_IDE_PORT", 8080))
+
+
+def _is_port_free(port: int, host: str = "127.0.0.1") -> bool:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.2)
+        return s.connect_ex((host, port)) != 0
+
+
+def _pick_port(requested: int) -> int:
+    if _is_port_free(requested):
+        return requested
+    for candidate in range(requested + 1, requested + 100):
+        if _is_port_free(candidate):
+            app_log(f"Порт {requested} занят, использую свободный порт {candidate}", level="warning", source="startup")
+            return candidate
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        candidate = s.getsockname()[1]
+    app_log(f"Порт {requested} занят, свободный порт рядом не найден, использую {candidate}", level="warning", source="startup")
+    return candidate
+
+
+PORT = _pick_port(_requested_port())
+
+
 def _is_systemd() -> bool:
     """systemd выставляет INVOCATION_ID для каждого запущенного юнита."""
     return is_systemd()
@@ -42,7 +80,7 @@ def _restart_app() -> None:
 
     executable = sys.executable
     argv = sys.argv[:]
-    port = 8080
+    port = PORT
 
     watcher = f"""
 import socket, subprocess, time
@@ -1429,7 +1467,7 @@ def _setup_systray() -> None:
             import subprocess
             script = Path(__file__).parent / "_systray_subprocess.py"
             proc = subprocess.Popen(
-                [sys.executable, str(script), str(os.getpid()), "8080"],
+                [sys.executable, str(script), str(os.getpid()), str(PORT)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -1458,7 +1496,7 @@ def _setup_systray() -> None:
     import threading
 
     def _on_open(icon, item):
-        webbrowser.open("http://localhost:8080")
+        webbrowser.open(f"http://localhost:{PORT}")
 
     def _on_quit(icon, item):
         threading.Thread(target=lambda: (__import__("time").sleep(2), os._exit(0)), daemon=True).start()
@@ -1501,4 +1539,4 @@ nicegui_app.on_shutdown(_remove_pid)
 ui.timer(0.05, show_setup_wizard, once=True)
 ui.timer(2.0, _startup_update_check, once=True)
 
-ui.run(title="TL IDE", favicon="🛠️")
+ui.run(title="TL IDE", favicon="🛠️", port=PORT)

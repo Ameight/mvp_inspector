@@ -24,4 +24,4 @@ fi
 # Всегда синхронизируем зависимости (быстро если ничего не изменилось)
 .venv/bin/pip install -q -r requirements.txt
 
-exec .venv/bin/python main.py
+exec .venv/bin/python main.py "$@"

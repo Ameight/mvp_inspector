@@ -18,4 +18,4 @@ if not exist ".venv" (
 :: Всегда синхронизируем зависимости
 .venv\Scripts\pip install -q -r requirements.txt
 
-.venv\Scripts\python main.py
+.venv\Scripts\python main.py %*
